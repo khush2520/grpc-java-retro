@@ -64,6 +64,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutionException;
@@ -375,8 +376,9 @@ final class XdsServerWrapper extends Server {
       if (stopped) {
         return;
       }
-      logger.log(Level.FINEST, "Received Lds update {0}", update);
       checkNotNull(update.listener(), "update");
+      reconcileFilterChains(
+          update.listener().filterChains(), update.listener().defaultFilterChain());
       if (!pendingRds.isEmpty()) {
         // filter chain state has not yet been applied to filterChainSelectorManager and there
         // are two sets of sslContextProviderSuppliers, so we release the old ones.
@@ -455,6 +457,7 @@ final class XdsServerWrapper extends Server {
         s.close();
       }
       releaseSuppliersInFlight();
+      reconcileFilterChains(Collections.<FilterChain>emptyList(), null);
     }
 
     private void updateSelector() {
@@ -479,9 +482,10 @@ final class XdsServerWrapper extends Server {
 
     private AtomicReference<ServerRoutingConfig> generateRoutingConfig(FilterChain filterChain) {
       HttpConnectionManager hcm = filterChain.httpConnectionManager();
+      boolean isDefault = (filterChain == defaultFilterChain);
       if (hcm.virtualHosts() != null) {
         ImmutableMap<Route, ServerInterceptor> interceptors = generatePerRouteInterceptors(
-                hcm.httpFilterConfigs(), hcm.virtualHosts());
+                filterChain, isDefault, hcm.httpFilterConfigs(), hcm.virtualHosts());
         return new AtomicReference<>(ServerRoutingConfig.create(hcm.virtualHosts(),interceptors));
       } else {
         RouteDiscoveryState rds = routeDiscoveryStates.get(hcm.rdsName());
@@ -489,7 +493,7 @@ final class XdsServerWrapper extends Server {
         AtomicReference<ServerRoutingConfig> serverRoutingConfigRef = new AtomicReference<>();
         if (rds.savedVirtualHosts != null) {
           ImmutableMap<Route, ServerInterceptor> interceptors = generatePerRouteInterceptors(
-              hcm.httpFilterConfigs(), rds.savedVirtualHosts);
+              filterChain, isDefault, hcm.httpFilterConfigs(), rds.savedVirtualHosts);
           ServerRoutingConfig serverRoutingConfig =
               ServerRoutingConfig.create(rds.savedVirtualHosts, interceptors);
           serverRoutingConfigRef.set(serverRoutingConfig);
@@ -502,9 +506,12 @@ final class XdsServerWrapper extends Server {
     }
 
     private ImmutableMap<Route, ServerInterceptor> generatePerRouteInterceptors(
+        FilterChain filterChain, boolean isDefault,
         List<NamedFilterConfig> namedFilterConfigs, List<VirtualHost> virtualHosts) {
       ImmutableMap.Builder<Route, ServerInterceptor> perRouteInterceptors =
           new ImmutableMap.Builder<>();
+      FilterChainKey key = new FilterChainKey(filterChain, isDefault);
+      Map<String, FilterState> fcFilters = filterChainFilters.get(key);
       for (VirtualHost virtualHost : virtualHosts) {
         for (Route route : virtualHost.routes()) {
           List<ServerInterceptor> filterInterceptors = new ArrayList<>();
@@ -514,8 +521,9 @@ final class XdsServerWrapper extends Server {
           if (namedFilterConfigs != null) {
             for (NamedFilterConfig namedFilterConfig : namedFilterConfigs) {
               FilterConfig filterConfig = namedFilterConfig.filterConfig;
-              Filter.Provider provider = filterRegistry.get(filterConfig.typeUrl());
-              Filter filter = provider == null ? null : provider.newInstance();
+              FilterState filterState =
+                  (fcFilters != null) ? fcFilters.get(namedFilterConfig.name) : null;
+              Filter filter = (filterState != null) ? filterState.filter : null;
               if (filter instanceof ServerInterceptorBuilder) {
                 ServerInterceptor interceptor =
                     ((ServerInterceptorBuilder) filter).buildServerInterceptor(
@@ -573,6 +581,7 @@ final class XdsServerWrapper extends Server {
       }
       isServing = false;
       listener.onNotServing(exception);
+      reconcileFilterChains(Collections.<FilterChain>emptyList(), null);
     }
 
     private void cleanUpRouteDiscoveryStates() {
@@ -616,6 +625,117 @@ final class XdsServerWrapper extends Server {
               && (supplier = defaultFilterChain.sslContextProviderSupplier()) != null) {
         supplier.close();
       }
+    }
+
+    private final Map<FilterChainKey, Map<String, FilterState>>
+        filterChainFilters = new HashMap<>();
+
+    private final class FilterState {
+      final Filter filter;
+      final FilterConfig config;
+
+      FilterState(Filter filter, FilterConfig config) {
+        this.filter = filter;
+        this.config = config;
+      }
+    }
+
+    private final class FilterChainKey {
+      @Nullable final String name;
+      @Nullable final EnvoyServerProtoData.FilterChainMatch match;
+      final boolean isDefault;
+
+      FilterChainKey(FilterChain fc, boolean isDefault) {
+        this.name = fc.name();
+        this.match = fc.filterChainMatch();
+        this.isDefault = isDefault;
+      }
+
+      @Override
+      public boolean equals(Object o) {
+        if (this == o) {
+          return true;
+        }
+        if (o == null || getClass() != o.getClass()) {
+          return false;
+        }
+        FilterChainKey that = (FilterChainKey) o;
+        return isDefault == that.isDefault
+            && Objects.equals(name, that.name)
+            && Objects.equals(match, that.match);
+      }
+
+      @Override
+      public int hashCode() {
+        return Objects.hash(name, match, isDefault);
+      }
+    }
+
+    private void reconcileFilterChains(
+        List<FilterChain> filterChains, @Nullable FilterChain defaultFilterChain) {
+      List<FilterChain> allFilterChains = filterChains;
+      if (defaultFilterChain != null) {
+        allFilterChains = new ArrayList<>(filterChains);
+        allFilterChains.add(defaultFilterChain);
+      }
+
+      Map<FilterChainKey, Map<String, FilterState>> nextFilterChainFilters = new HashMap<>();
+
+      for (FilterChain fc : allFilterChains) {
+        boolean isDefault = (fc == defaultFilterChain);
+        FilterChainKey key = new FilterChainKey(fc, isDefault);
+        Map<String, FilterState> oldFilters = filterChainFilters.get(key);
+        Map<String, FilterState> fcFilters = new HashMap<>();
+
+        List<NamedFilterConfig> filterConfigs = fc.httpConnectionManager().httpFilterConfigs();
+        if (filterConfigs != null) {
+          for (NamedFilterConfig namedConfig : filterConfigs) {
+            String name = namedConfig.name;
+            FilterConfig newConfig = namedConfig.filterConfig;
+            if (newConfig == null) {
+              continue;
+            }
+            FilterState existing = (oldFilters != null) ? oldFilters.get(name) : null;
+
+            if (existing != null && existing.config.equals(newConfig)) {
+              fcFilters.put(name, existing);
+            } else {
+              Filter.Provider provider = filterRegistry.get(newConfig.typeUrl());
+              if (provider != null) {
+                Filter filter = provider.newInstance(name);
+                if (filter == null) {
+                  filter = provider.newInstance();
+                }
+                fcFilters.put(name, new FilterState(filter, newConfig));
+              }
+            }
+          }
+        }
+        nextFilterChainFilters.put(key, fcFilters);
+      }
+
+      for (Map.Entry<FilterChainKey, Map<String, FilterState>> entry :
+          filterChainFilters.entrySet()) {
+        FilterChainKey key = entry.getKey();
+        Map<String, FilterState> oldFilters = entry.getValue();
+        Map<String, FilterState> nextFilters = nextFilterChainFilters.get(key);
+
+        if (nextFilters == null) {
+          for (FilterState fs : oldFilters.values()) {
+            fs.filter.close();
+          }
+        } else {
+          for (Map.Entry<String, FilterState> oldEntry : oldFilters.entrySet()) {
+            FilterState nextState = nextFilters.get(oldEntry.getKey());
+            if (nextState == null || nextState.filter != oldEntry.getValue().filter) {
+              oldEntry.getValue().filter.close();
+            }
+          }
+        }
+      }
+
+      filterChainFilters.clear();
+      filterChainFilters.putAll(nextFilterChainFilters);
     }
 
     private final class RouteDiscoveryState implements ResourceWatcher<RdsUpdate> {
@@ -686,8 +806,11 @@ final class XdsServerWrapper extends Server {
             if (savedVirtualHosts == null) {
               updatedRoutingConfig = ServerRoutingConfig.FAILING_ROUTING_CONFIG;
             } else {
+              boolean isDefault = (filterChain == defaultFilterChain);
               ImmutableMap<Route, ServerInterceptor> updatedInterceptors =
                   generatePerRouteInterceptors(
+                      filterChain,
+                      isDefault,
                       filterChain.httpConnectionManager().httpFilterConfigs(),
                       savedVirtualHosts);
               updatedRoutingConfig = ServerRoutingConfig.create(savedVirtualHosts,

@@ -100,6 +100,7 @@ import java.net.URISyntaxException;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -1961,6 +1962,197 @@ public class XdsNameResolverTest {
         observer, Status.UNKNOWN.withDescription("RPC terminated due to fault injection"));
   }
 
+  @Test
+  public void cdsWatchesLifecycle() {
+    resolver.start(mockListener);
+    FakeXdsClient xdsClient = (FakeXdsClient) resolver.getXdsClient();
+
+    // 1. Deliver LDS with two clusters: cluster1 and cluster2
+    Route route1 = Route.forAction(
+        RouteMatch.create(PathMatcher.fromPrefix("/1", false), Collections.emptyList(), null),
+        RouteAction.forCluster(cluster1, Collections.emptyList(), null, null, false),
+        Collections.emptyMap());
+    Route route2 = Route.forAction(
+        RouteMatch.create(PathMatcher.fromPrefix("/2", false), Collections.emptyList(), null),
+        RouteAction.forCluster(cluster2, Collections.emptyList(), null, null, false),
+        Collections.emptyMap());
+    xdsClient.deliverLdsUpdate(ImmutableList.of(route1, route2));
+
+    // Verify both CDS resources are watched
+    assertThat(xdsClient.cdsWatchers.keySet()).containsExactly(cluster1, cluster2);
+
+    // 2. Deliver LDS with only cluster1
+    xdsClient.deliverLdsUpdate(ImmutableList.of(route1));
+
+    // Verify cluster2 watch is cancelled, cluster1 watch remains
+    assertThat(xdsClient.cdsWatchers.keySet()).containsExactly(cluster1);
+
+    // 3. Stop resolver (shutdown)
+    resolver.shutdown();
+
+    // Verify all CDS watches are cancelled
+    assertThat(xdsClient.cdsWatchers).isEmpty();
+  }
+
+  private static final class FakeFilter implements Filter, Filter.ClientInterceptorBuilder {
+    int closeCount = 0;
+
+    @Override
+    public void close() {
+      closeCount++;
+    }
+
+    @Override
+    public ClientInterceptor buildClientInterceptor(
+        FilterConfig config, @Nullable FilterConfig overrideConfig, PickSubchannelArgs args,
+        ScheduledExecutorService scheduler) {
+      return null;
+    }
+  }
+
+  @Test
+  public void filterLifecycleReusedAndClosed() {
+    final List<FakeFilter> createdFilters = new ArrayList<>();
+    FilterRegistry registry = FilterRegistry.newRegistry().register(
+        new Filter.Provider() {
+          @Override
+          public String[] typeUrls() {
+            return new String[] { "type.googleapis.com/test.Filter" };
+          }
+
+          @Override
+          public boolean isClientFilter() {
+            return true;
+          }
+
+          @Override
+          public boolean isServerFilter() {
+            return false;
+          }
+
+          @Override
+          public Filter newInstance() {
+            FakeFilter f = new FakeFilter();
+            createdFilters.add(f);
+            return f;
+          }
+
+          @Override
+          public Filter newInstance(String name) {
+            return newInstance();
+          }
+
+          @Override
+          public io.grpc.xds.ConfigOrError<? extends FilterConfig> parseFilterConfig(
+              com.google.protobuf.Message message) {
+            return io.grpc.xds.ConfigOrError.fromConfig(new FilterConfig() {
+              @Override
+              public String typeUrl() {
+                return "type.googleapis.com/test.Filter";
+              }
+
+              @Override
+              public boolean equals(Object o) {
+                return o instanceof FilterConfig && typeUrl().equals(((FilterConfig) o).typeUrl());
+              }
+
+              @Override
+              public int hashCode() {
+                return typeUrl().hashCode();
+              }
+            });
+          }
+
+          @Override
+          public io.grpc.xds.ConfigOrError<? extends FilterConfig> parseFilterConfigOverride(
+              com.google.protobuf.Message message) {
+            return null;
+          }
+        },
+        new RouterFilter.Provider());
+
+    XdsNameResolver testResolver = new XdsNameResolver(targetUri, null, AUTHORITY, null,
+        serviceConfigParser, syncContext, scheduler,
+        xdsClientPoolFactory, mockRandom, registry, null);
+
+    testResolver.start(mockListener);
+    FakeXdsClient xdsClient = (FakeXdsClient) testResolver.getXdsClient();
+
+    // Setup filter config
+    FilterConfig config = new FilterConfig() {
+      @Override
+      public String typeUrl() {
+        return "type.googleapis.com/test.Filter";
+      }
+
+      @Override
+      public boolean equals(Object o) {
+        return o instanceof FilterConfig && typeUrl().equals(((FilterConfig) o).typeUrl());
+      }
+
+      @Override
+      public int hashCode() {
+        return typeUrl().hashCode();
+      }
+    };
+
+    List<NamedFilterConfig> filterChain = ImmutableList.of(
+        new NamedFilterConfig("test-filter", config),
+        new NamedFilterConfig(ROUTER_FILTER_INSTANCE_NAME, RouterFilter.ROUTER_CONFIG));
+
+    // Deliver LDS with filter chain
+    VirtualHost virtualHost = VirtualHost.create(
+        "virtual-host",
+        Collections.singletonList(expectedLdsResourceName),
+        Collections.singletonList(Route.forAction(
+            RouteMatch.create(PathMatcher.fromPrefix("/", false), Collections.emptyList(), null),
+            RouteAction.forCluster(cluster1, Collections.emptyList(), null, null, false),
+            Collections.emptyMap())),
+        Collections.emptyMap());
+
+    syncContext.execute(() -> {
+      xdsClient.ldsWatcher.onChanged(LdsUpdate.forApiListener(HttpConnectionManager.forVirtualHosts(
+          0L, Collections.singletonList(virtualHost), filterChain)));
+    });
+
+    // Verify 1 filter created
+    assertThat(createdFilters).hasSize(1);
+    FakeFilter filter1 = createdFilters.get(0);
+    assertThat(filter1.closeCount).isEqualTo(0);
+
+    // Deliver identical LDS update (same config)
+    syncContext.execute(() -> {
+      xdsClient.ldsWatcher.onChanged(LdsUpdate.forApiListener(HttpConnectionManager.forVirtualHosts(
+          0L, Collections.singletonList(virtualHost), filterChain)));
+    });
+
+    // Verify no new filter is created, and old filter is not closed
+    assertThat(createdFilters).hasSize(1);
+    assertThat(filter1.closeCount).isEqualTo(0);
+
+    // Deliver LDS with different filter config (or different name)
+    List<NamedFilterConfig> newFilterChain = ImmutableList.of(
+        new NamedFilterConfig("new-filter-name", config),
+        new NamedFilterConfig(ROUTER_FILTER_INSTANCE_NAME, RouterFilter.ROUTER_CONFIG));
+
+    syncContext.execute(() -> {
+      xdsClient.ldsWatcher.onChanged(LdsUpdate.forApiListener(HttpConnectionManager.forVirtualHosts(
+          0L, Collections.singletonList(virtualHost), newFilterChain)));
+    });
+
+    // Verify new filter is created, and old filter is closed!
+    assertThat(createdFilters).hasSize(2);
+    FakeFilter filter2 = createdFilters.get(1);
+    assertThat(filter1.closeCount).isEqualTo(1);
+    assertThat(filter2.closeCount).isEqualTo(0);
+
+    // Shutdown name resolver
+    testResolver.shutdown();
+
+    // Verify the remaining active filter is closed!
+    assertThat(filter2.closeCount).isEqualTo(1);
+  }
+
   private <ReqT, RespT> ClientCall.Listener<RespT> startNewCall(
       MethodDescriptor<ReqT, RespT> method, InternalConfigSelector selector,
       Map<String, String> headers, CallOptions callOptions) {
@@ -2059,6 +2251,7 @@ public class XdsNameResolverTest {
     private String rdsResource;
     private ResourceWatcher<LdsUpdate> ldsWatcher;
     private ResourceWatcher<RdsUpdate> rdsWatcher;
+    final Map<String, ResourceWatcher<XdsClusterResource.CdsUpdate>> cdsWatchers = new HashMap<>();
 
     @Override
     public BootstrapInfo getBootstrapInfo() {
@@ -2086,6 +2279,9 @@ public class XdsNameResolverTest {
           rdsResource = resourceName;
           rdsWatcher = (ResourceWatcher<RdsUpdate>) watcher;
           break;
+        case "CDS":
+          cdsWatchers.put(resourceName, (ResourceWatcher<XdsClusterResource.CdsUpdate>) watcher);
+          break;
         default:
       }
     }
@@ -2107,6 +2303,9 @@ public class XdsNameResolverTest {
           assertThat(rdsWatcher).isNotNull();
           rdsResource = null;
           rdsWatcher = null;
+          break;
+        case "CDS":
+          cdsWatchers.remove(resourceName);
           break;
         default:
       }

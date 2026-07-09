@@ -128,6 +128,9 @@ final class XdsNameResolver extends NameResolver {
   private final ConfigSelector configSelector = new ConfigSelector();
   private final long randomChannelId;
 
+  private final Map<String, FilterState> activeFilters = new HashMap<>();
+  private volatile Map<String, Filter> activeFilterInstances = Collections.emptyMap();
+
   private volatile RoutingConfig routingConfig = RoutingConfig.empty;
   private Listener2 listener;
   private ObjectPool<XdsClient> xdsClientPool;
@@ -238,6 +241,7 @@ final class XdsNameResolver extends NameResolver {
     if (xdsClient != null) {
       xdsClient = xdsClientPool.returnObject(xdsClient);
     }
+    reconcileFilters(null);
   }
 
   @VisibleForTesting
@@ -453,11 +457,11 @@ final class XdsNameResolver extends NameResolver {
             parsedServiceConfig.getError().augmentDescription(
                 "Failed to parse service config (method config)"));
       }
+      Map<String, Filter> filters = activeFilterInstances;
       if (routingCfg.filterChain != null) {
         for (NamedFilterConfig namedFilter : routingCfg.filterChain) {
           FilterConfig filterConfig = namedFilter.filterConfig;
-          Filter.Provider provider = filterRegistry.get(filterConfig.typeUrl());
-          Filter filter = provider == null ? null : provider.newInstance(namedFilter.name);
+          Filter filter = filters.get(namedFilter.name);
           if (filter instanceof ClientInterceptorBuilder) {
             ClientInterceptor interceptor = ((ClientInterceptorBuilder) filter)
                 .buildClientInterceptor(
@@ -654,6 +658,31 @@ final class XdsNameResolver extends NameResolver {
     private Set<String> existingClusters;  // clusters to which new requests can be routed
     @Nullable
     private RouteDiscoveryState routeDiscoveryState;
+    private final Map<String, ClusterWatcher> cdsWatchers = new HashMap<>();
+
+    private final class ClusterWatcher implements ResourceWatcher<XdsClusterResource.CdsUpdate> {
+      private final String clusterName;
+
+      ClusterWatcher(String clusterName) {
+        this.clusterName = clusterName;
+      }
+
+      @Override
+      public void onChanged(XdsClusterResource.CdsUpdate update) {
+        logger.log(
+            XdsLogLevel.INFO, "Received CDS update for cluster {0}: {1}", clusterName, update);
+      }
+
+      @Override
+      public void onError(Status error) {
+        logger.log(XdsLogLevel.WARNING, "Error loading CDS {0}: {1}", clusterName, error);
+      }
+
+      @Override
+      public void onResourceDoesNotExist(String resourceName) {
+        logger.log(XdsLogLevel.WARNING, "CDS resource does not exist: {0}", resourceName);
+      }
+    }
 
     ResolveState(String ldsResourceName) {
       this.ldsResourceName = ldsResourceName;
@@ -710,10 +739,20 @@ final class XdsNameResolver extends NameResolver {
     }
 
     private void stop() {
+      if (stopped) {
+        return;
+      }
       logger.log(XdsLogLevel.INFO, "Stop watching LDS resource {0}", ldsResourceName);
       stopped = true;
       cleanUpRouteDiscoveryState();
-      xdsClient.cancelXdsResourceWatch(XdsListenerResource.getInstance(), ldsResourceName, this);
+      if (xdsClient != null) {
+        xdsClient.cancelXdsResourceWatch(XdsListenerResource.getInstance(), ldsResourceName, this);
+        for (Map.Entry<String, ClusterWatcher> entry : cdsWatchers.entrySet()) {
+          xdsClient.cancelXdsResourceWatch(
+              XdsClusterResource.getInstance(), entry.getKey(), entry.getValue());
+        }
+      }
+      cdsWatchers.clear();
     }
 
     // called in syncContext
@@ -801,6 +840,26 @@ final class XdsNameResolver extends NameResolver {
       if (shouldUpdateResult) {
         updateResolutionResult();
       }
+      // Reconcile CDS watches for selectable clusters
+      Set<String> newCdsResources = new HashSet<>(clusterNameMap.values());
+      for (String clusterName : newCdsResources) {
+        if (!cdsWatchers.containsKey(clusterName)) {
+          ClusterWatcher watcher = new ClusterWatcher(clusterName);
+          cdsWatchers.put(clusterName, watcher);
+          xdsClient.watchXdsResource(
+              XdsClusterResource.getInstance(), clusterName, watcher, syncContext);
+        }
+      }
+      Set<String> deletedCdsResources =
+          Sets.difference(cdsWatchers.keySet(), newCdsResources).immutableCopy();
+      for (String clusterName : deletedCdsResources) {
+        ClusterWatcher watcher = cdsWatchers.remove(clusterName);
+        xdsClient.cancelXdsResourceWatch(
+            XdsClusterResource.getInstance(), clusterName, watcher);
+      }
+
+      reconcileFilters(filterConfigs);
+
       // Make newly added clusters selectable by config selector and deleted clusters no longer
       // selectable.
       routingConfig =
@@ -830,6 +889,12 @@ final class XdsNameResolver extends NameResolver {
         }
         existingClusters = null;
       }
+      for (Map.Entry<String, ClusterWatcher> entry : cdsWatchers.entrySet()) {
+        xdsClient.cancelXdsResourceWatch(
+            XdsClusterResource.getInstance(), entry.getKey(), entry.getValue());
+      }
+      cdsWatchers.clear();
+      reconcileFilters(null);
       routingConfig = RoutingConfig.empty;
       // Without addresses the default LB (normally pick_first) should become TRANSIENT_FAILURE, and
       // the config selector handles the error message itself. Once the LB API allows providing
@@ -970,5 +1035,54 @@ final class XdsNameResolver extends NameResolver {
     static ClusterRefState forRlsPlugin(AtomicInteger refCount, RlsPluginConfig rlsPluginConfig) {
       return new ClusterRefState(refCount, null, rlsPluginConfig);
     }
+  }
+
+  private static final class FilterState {
+    final Filter filter;
+    final FilterConfig config;
+
+    FilterState(Filter filter, FilterConfig config) {
+      this.filter = filter;
+      this.config = config;
+    }
+  }
+
+  private void reconcileFilters(@Nullable List<NamedFilterConfig> newFilterChain) {
+    Map<String, FilterState> nextFilters = new HashMap<>();
+    if (newFilterChain != null) {
+      for (NamedFilterConfig namedConfig : newFilterChain) {
+        String name = namedConfig.name;
+        FilterConfig newConfig = namedConfig.filterConfig;
+        FilterState existing = activeFilters.get(name);
+        if (existing != null && existing.config.equals(newConfig)) {
+          nextFilters.put(name, existing);
+        } else {
+          Filter.Provider provider = filterRegistry.get(newConfig.typeUrl());
+          if (provider != null) {
+            Filter filter = provider.newInstance(name);
+            if (filter == null) {
+              filter = provider.newInstance();
+            }
+            nextFilters.put(name, new FilterState(filter, newConfig));
+          }
+        }
+      }
+    }
+
+    for (Map.Entry<String, FilterState> entry : activeFilters.entrySet()) {
+      FilterState nextState = nextFilters.get(entry.getKey());
+      if (nextState == null || nextState.filter != entry.getValue().filter) {
+        entry.getValue().filter.close();
+      }
+    }
+
+    activeFilters.clear();
+    activeFilters.putAll(nextFilters);
+
+    ImmutableMap.Builder<String, Filter> builder = ImmutableMap.builder();
+    for (Map.Entry<String, FilterState> entry : activeFilters.entrySet()) {
+      builder.put(entry.getKey(), entry.getValue().filter);
+    }
+    activeFilterInstances = builder.buildOrThrow();
   }
 }

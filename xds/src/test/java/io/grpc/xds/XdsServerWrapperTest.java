@@ -82,6 +82,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.TimeoutException;
 import java.util.concurrent.atomic.AtomicReference;
+import javax.annotation.Nullable;
 import org.junit.After;
 import org.junit.Before;
 import org.junit.Rule;
@@ -1336,5 +1337,171 @@ public class XdsServerWrapperTest {
 
   private static EnvoyServerProtoData.DownstreamTlsContext createTls() {
     return CommonTlsContextTestsUtil.buildTestInternalDownstreamTlsContext("CERT1", "VA1");
+  }
+
+  @Test
+  public void discoverState_filterLifecycleReusedAndClosed() throws Exception {
+    final List<FakeServerFilter> createdFilters = new ArrayList<>();
+    FilterRegistry testRegistry = FilterRegistry.newRegistry().register(
+        new Filter.Provider() {
+          @Override
+          public String[] typeUrls() {
+            return new String[] { "type.googleapis.com/test.ServerFilter" };
+          }
+
+          @Override
+          public boolean isClientFilter() {
+            return false;
+          }
+
+          @Override
+          public boolean isServerFilter() {
+            return true;
+          }
+
+          @Override
+          public Filter newInstance() {
+            FakeServerFilter f = new FakeServerFilter();
+            createdFilters.add(f);
+            return f;
+          }
+
+          @Override
+          public Filter newInstance(String name) {
+            return newInstance();
+          }
+
+          @Override
+          public io.grpc.xds.ConfigOrError<? extends FilterConfig> parseFilterConfig(
+              com.google.protobuf.Message message) {
+            return io.grpc.xds.ConfigOrError.fromConfig(new FilterConfig() {
+              @Override
+              public String typeUrl() {
+                return "type.googleapis.com/test.ServerFilter";
+              }
+
+              @Override
+              public boolean equals(Object o) {
+                return o instanceof FilterConfig && typeUrl().equals(((FilterConfig) o).typeUrl());
+              }
+
+              @Override
+              public int hashCode() {
+                return typeUrl().hashCode();
+              }
+            });
+          }
+
+          @Override
+          public io.grpc.xds.ConfigOrError<? extends FilterConfig> parseFilterConfigOverride(
+              com.google.protobuf.Message message) {
+            return null;
+          }
+        });
+
+    xdsServerWrapper = new XdsServerWrapper(
+        "localhost:8080",
+        mockBuilder,
+        listener,
+        selectorManager,
+        new FakeXdsClientPoolFactory(xdsClient),
+        testRegistry,
+        executor.getScheduledExecutorService());
+
+    final SettableFuture<Server> start = SettableFuture.create();
+    Executors.newSingleThreadExecutor().execute(() -> {
+      try {
+        start.set(xdsServerWrapper.start());
+      } catch (Exception ex) {
+        start.setException(ex);
+      }
+    });
+
+    // 1. Deliver LDS update with the test filter
+    FilterConfig config = new FilterConfig() {
+      @Override
+      public String typeUrl() {
+        return "type.googleapis.com/test.ServerFilter";
+      }
+
+      @Override
+      public boolean equals(Object o) {
+        return o instanceof FilterConfig && typeUrl().equals(((FilterConfig) o).typeUrl());
+      }
+
+      @Override
+      public int hashCode() {
+        return typeUrl().hashCode();
+      }
+    };
+
+    List<NamedFilterConfig> httpFilterConfigs = ImmutableList.of(
+        new NamedFilterConfig("test-filter", config));
+
+    VirtualHost virtualHost = VirtualHost.create(
+        "v1",
+        Collections.singletonList("localhost:8080"),
+        Collections.singletonList(Route.forAction(
+            RouteMatch.create(PathMatcher.fromPrefix("/", false), Collections.emptyList(), null),
+            null,
+            ImmutableMap.of())),
+        ImmutableMap.of());
+
+    HttpConnectionManager hcm = HttpConnectionManager.forVirtualHosts(
+        0L, Collections.singletonList(virtualHost), httpFilterConfigs);
+
+    FilterChain filterChain = createFilterChain("filter-chain-0", hcm);
+
+    xdsClient.deliverLdsUpdate(ImmutableList.of(filterChain), null);
+
+    // Verify filter created
+    assertThat(createdFilters).hasSize(1);
+    FakeServerFilter filter1 = createdFilters.get(0);
+    assertThat(filter1.closeCount).isEqualTo(0);
+
+    // Deliver identical LDS update
+    xdsClient.deliverLdsUpdate(ImmutableList.of(filterChain), null);
+
+    // Verify filter is reused (not recreated, not closed)
+    assertThat(createdFilters).hasSize(1);
+    assertThat(filter1.closeCount).isEqualTo(0);
+
+    // Deliver LDS with filter chain removed/different
+    HttpConnectionManager emptyHcm = HttpConnectionManager.forVirtualHosts(
+        0L, Collections.singletonList(virtualHost), ImmutableList.of());
+
+    FilterChain emptyFilterChain = createFilterChain("filter-chain-0", emptyHcm);
+
+    xdsClient.deliverLdsUpdate(ImmutableList.of(emptyFilterChain), null);
+
+    // Verify filter1 is closed!
+    assertThat(filter1.closeCount).isEqualTo(1);
+
+    // 2. Deliver LDS update again with a new filter instance
+    xdsClient.deliverLdsUpdate(ImmutableList.of(filterChain), null);
+    assertThat(createdFilters).hasSize(2);
+    FakeServerFilter filter2 = createdFilters.get(1);
+    assertThat(filter2.closeCount).isEqualTo(0);
+
+    // Shutdown server wrapper
+    xdsServerWrapper.shutdown();
+
+    // Verify active filter is closed!
+    assertThat(filter2.closeCount).isEqualTo(1);
+  }
+
+  private static final class FakeServerFilter implements Filter, Filter.ServerInterceptorBuilder {
+    int closeCount = 0;
+
+    @Override
+    public void close() {
+      closeCount++;
+    }
+
+    @Override
+    public ServerInterceptor buildServerInterceptor(
+        FilterConfig config, @Nullable FilterConfig overrideConfig) {
+      return null;
+    }
   }
 }
