@@ -169,7 +169,45 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
     updateBuilder.filterMetadata(
         ImmutableMap.copyOf(cluster.getMetadata().getFilterMetadataMap()));
 
+    ImmutableMap.Builder<String, FilterMetadataValue> metadataBuilder = ImmutableMap.builder();
+    MetadataRegistry metadataRegistry = MetadataRegistry.getDefaultRegistry();
+
+    java.util.Set<String> allKeys = new java.util.HashSet<>();
+    if (cluster.hasMetadata()) {
+      allKeys.addAll(cluster.getMetadata().getTypedFilterMetadataMap().keySet());
+      allKeys.addAll(cluster.getMetadata().getFilterMetadataMap().keySet());
+
+      for (String key : allKeys) {
+        com.google.protobuf.Any typedValue =
+            cluster.getMetadata().getTypedFilterMetadataMap().get(key);
+        Struct structValue = cluster.getMetadata().getFilterMetadataMap().get(key);
+
+        if (typedValue != null && metadataRegistry.get(typedValue.getTypeUrl()) != null) {
+          Object parsedValue = metadataRegistry.parse(typedValue);
+          metadataBuilder.put(key, new FilterMetadataValue(typedValue.getTypeUrl(), parsedValue));
+        } else if (structValue != null) {
+          Object parsedValue = parseMetadataStruct(structValue);
+          metadataBuilder.put(key,
+              new FilterMetadataValue("type.googleapis.com/google.protobuf.Struct", parsedValue));
+        }
+      }
+    }
+    updateBuilder.metadata(metadataBuilder.build());
+
     return updateBuilder.build();
+  }
+
+  private static Object parseMetadataStruct(Struct struct) throws ResourceInvalidException {
+    try {
+      Object rawJsonConfig = io.grpc.internal.JsonParser.parse(
+          com.google.protobuf.util.JsonFormat.printer().print(struct));
+      if (!(rawJsonConfig instanceof java.util.Map)) {
+        throw new ResourceInvalidException("Metadata does not contain a JSON object");
+      }
+      return rawJsonConfig;
+    } catch (java.io.IOException e) {
+      throw new ResourceInvalidException("Failed to parse metadata struct: " + e.getMessage(), e);
+    }
   }
 
   private static StructOrError<CdsUpdate.Builder> parseAggregateCluster(Cluster cluster) {
@@ -571,13 +609,16 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
 
     abstract ImmutableMap<String, Struct> filterMetadata();
 
+    abstract ImmutableMap<String, FilterMetadataValue> metadata();
+
     private static Builder newBuilder(String clusterName) {
       return new AutoValue_XdsClusterResource_CdsUpdate.Builder()
           .clusterName(clusterName)
           .minRingSize(0)
           .maxRingSize(0)
           .choiceCount(0)
-          .filterMetadata(ImmutableMap.of());
+          .filterMetadata(ImmutableMap.of())
+          .metadata(ImmutableMap.of());
     }
 
     static Builder forAggregate(String clusterName, List<String> prioritizedClusterNames) {
@@ -695,6 +736,8 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
       protected abstract Builder outlierDetection(OutlierDetection outlierDetection);
 
       protected abstract Builder filterMetadata(ImmutableMap<String, Struct> filterMetadata);
+
+      protected abstract Builder metadata(ImmutableMap<String, FilterMetadataValue> metadata);
 
       abstract CdsUpdate build();
     }

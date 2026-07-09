@@ -2308,6 +2308,133 @@ public class GrpcXdsClientImplDataTest {
   }
 
   @Test
+  public void parseCluster_validGcpAuthnMetadata() throws ResourceInvalidException {
+    String origProp = System.getProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER");
+    System.setProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER", "true");
+    MetadataRegistry.resetForTesting();
+    try {
+      io.envoyproxy.envoy.extensions.filters.http.gcp_authn.v3.Audience audience =
+          io.envoyproxy.envoy.extensions.filters.http.gcp_authn.v3.Audience.newBuilder()
+              .setUrl("https://foo.bar")
+              .build();
+      io.envoyproxy.envoy.config.core.v3.Metadata metadata =
+          io.envoyproxy.envoy.config.core.v3.Metadata.newBuilder()
+              .putTypedFilterMetadata("envoy.extensions.filters.http.gcp_authn.v3.Audience",
+                  Any.pack(audience))
+              .build();
+
+      Cluster cluster = Cluster.newBuilder()
+          .setName("cluster-foo.googleapis.com")
+          .setType(DiscoveryType.EDS)
+          .setEdsClusterConfig(
+              EdsClusterConfig.newBuilder()
+                  .setEdsConfig(
+                      ConfigSource.newBuilder()
+                          .setAds(AggregatedConfigSource.getDefaultInstance()))
+                  .setServiceName("service-foo.googleapis.com"))
+          .setLbPolicy(LbPolicy.ROUND_ROBIN)
+          .setMetadata(metadata)
+          .build();
+
+      CdsUpdate update = XdsClusterResource.processCluster(
+          cluster, null, LRS_SERVER_INFO,
+          LoadBalancerRegistry.getDefaultRegistry());
+
+      assertThat(update.metadata()).containsKey("envoy.extensions.filters.http.gcp_authn.v3.Audience");
+      FilterMetadataValue value = update.metadata().get("envoy.extensions.filters.http.gcp_authn.v3.Audience");
+      assertThat(value.typeUrl()).isEqualTo("type.googleapis.com/envoy.extensions.filters.http.gcp_authn.v3.Audience");
+      assertThat(value.value()).isEqualTo("https://foo.bar");
+    } finally {
+      if (origProp != null) {
+        System.setProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER", origProp);
+      } else {
+        System.clearProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER");
+      }
+      MetadataRegistry.resetForTesting();
+    }
+  }
+
+  @Test
+  public void parseCluster_invalidGcpAuthnMetadata_emptyUrl() throws ResourceInvalidException {
+    String origProp = System.getProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER");
+    System.setProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER", "true");
+    MetadataRegistry.resetForTesting();
+    try {
+      io.envoyproxy.envoy.extensions.filters.http.gcp_authn.v3.Audience audience =
+          io.envoyproxy.envoy.extensions.filters.http.gcp_authn.v3.Audience.newBuilder()
+              .setUrl("")
+              .build();
+      io.envoyproxy.envoy.config.core.v3.Metadata metadata =
+          io.envoyproxy.envoy.config.core.v3.Metadata.newBuilder()
+              .putTypedFilterMetadata("envoy.extensions.filters.http.gcp_authn.v3.Audience",
+                  Any.pack(audience))
+              .build();
+
+      Cluster cluster = Cluster.newBuilder()
+          .setName("cluster-foo.googleapis.com")
+          .setType(DiscoveryType.EDS)
+          .setEdsClusterConfig(
+              EdsClusterConfig.newBuilder()
+                  .setEdsConfig(
+                      ConfigSource.newBuilder()
+                          .setAds(AggregatedConfigSource.getDefaultInstance()))
+                  .setServiceName("service-foo.googleapis.com"))
+          .setLbPolicy(LbPolicy.ROUND_ROBIN)
+          .setMetadata(metadata)
+          .build();
+
+      thrown.expect(ResourceInvalidException.class);
+      thrown.expectMessage("Audience url is empty");
+
+      XdsClusterResource.processCluster(
+          cluster, null, LRS_SERVER_INFO,
+          LoadBalancerRegistry.getDefaultRegistry());
+    } finally {
+      if (origProp != null) {
+        System.setProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER", origProp);
+      } else {
+        System.clearProperty("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER");
+      }
+      MetadataRegistry.resetForTesting();
+    }
+  }
+
+  @Test
+  public void parseCluster_fallbackToFilterMetadata() throws ResourceInvalidException {
+    Struct rawStruct = Struct.newBuilder()
+        .putFields("key1", Value.newBuilder().setStringValue("val1").build())
+        .build();
+    io.envoyproxy.envoy.config.core.v3.Metadata metadata =
+        io.envoyproxy.envoy.config.core.v3.Metadata.newBuilder()
+            .putFilterMetadata("com.google.custom.metadata", rawStruct)
+            .build();
+
+    Cluster cluster = Cluster.newBuilder()
+        .setName("cluster-foo.googleapis.com")
+        .setType(DiscoveryType.EDS)
+        .setEdsClusterConfig(
+            EdsClusterConfig.newBuilder()
+                .setEdsConfig(
+                    ConfigSource.newBuilder()
+                        .setAds(AggregatedConfigSource.getDefaultInstance()))
+                .setServiceName("service-foo.googleapis.com"))
+        .setLbPolicy(LbPolicy.ROUND_ROBIN)
+        .setMetadata(metadata)
+        .build();
+
+    CdsUpdate update = XdsClusterResource.processCluster(
+        cluster, null, LRS_SERVER_INFO,
+        LoadBalancerRegistry.getDefaultRegistry());
+
+    assertThat(update.metadata()).containsKey("com.google.custom.metadata");
+    FilterMetadataValue value = update.metadata().get("com.google.custom.metadata");
+    assertThat(value.typeUrl()).isEqualTo("type.googleapis.com/google.protobuf.Struct");
+    assertThat(value.value()).isInstanceOf(java.util.Map.class);
+    java.util.Map<?, ?> map = (java.util.Map<?, ?>) value.value();
+    assertThat(map.get("key1")).isEqualTo("val1");
+  }
+
+  @Test
   public void parseCluster_validateEdsSourceConfig() throws ResourceInvalidException {
     Cluster cluster1 = Cluster.newBuilder()
         .setName("cluster-foo.googleapis.com")
