@@ -418,7 +418,7 @@ final class ControlPlaneClient {
             return;
           }
           handleRpcResponse(type, response.getVersionInfo(), response.getResourcesList(),
-              response.getNonce(), isFirstResponse);
+              response.getResourceErrorsList(), response.getNonce(), isFirstResponse);
         }
       });
     }
@@ -430,14 +430,16 @@ final class ControlPlaneClient {
       });
     }
 
-    final void handleRpcResponse(XdsResourceType<?> type, String versionInfo, List<Any> resources,
-                                 String nonce, boolean isFirstResponse) {
+    final void handleRpcResponse(
+        XdsResourceType<?> type, String versionInfo, List<Any> resources,
+        List<io.envoyproxy.envoy.service.discovery.v3.ResourceError> resourceErrors,
+        String nonce, boolean isFirstResponse) {
       checkNotNull(type, "type");
 
       ProcessingTracker processingTracker = new ProcessingTracker(
           () -> call.startRecvMessage(), syncContext);
-      xdsResponseHandler.handleResourceResponse(type, serverInfo, versionInfo, resources, nonce,
-          isFirstResponse, processingTracker);
+      xdsResponseHandler.handleResourceResponse(type, serverInfo, versionInfo, resources,
+          resourceErrors, nonce, isFirstResponse, processingTracker);
       processingTracker.onComplete();
     }
 
@@ -490,7 +492,9 @@ final class ControlPlaneClient {
       rpcRetryTimer =
           syncContext.schedule(new RpcRetryTask(), delayNanos, TimeUnit.NANOSECONDS, timeService);
 
-      xdsResponseHandler.handleStreamClosed(newStatus, !responseReceived);
+      xdsResponseHandler.handleStreamClosed(
+          BootstrapperImpl.enableXdsDataErrorHandling ? status : newStatus,
+          !responseReceived);
     }
 
     private void close(Exception error) {

@@ -159,14 +159,15 @@ public abstract class GrpcXdsClientImplTestBase {
   private static final String NODE_ID = "cool-node-id";
   private static final Node NODE = Node.newBuilder().setId(NODE_ID).build();
   private static final Any FAILING_ANY = MessageFactory.FAILING_ANY;
-  private static final ChannelCredentials CHANNEL_CREDENTIALS = InsecureChannelCredentials.create();
+  protected static final ChannelCredentials CHANNEL_CREDENTIALS =
+      InsecureChannelCredentials.create();
   private static final XdsResourceType<?> LDS = XdsListenerResource.getInstance();
   private static final XdsResourceType<?> CDS = XdsClusterResource.getInstance();
   private static final XdsResourceType<?> RDS = XdsRouteConfigureResource.getInstance();
   private static final XdsResourceType<?> EDS = XdsEndpointResource.getInstance();
 
   // xDS control plane server info.
-  private ServerInfo xdsServerInfo;
+  protected ServerInfo xdsServerInfo;
 
   private static final FakeClock.TaskFilter RPC_RETRY_TASK_FILTER =
       new FakeClock.TaskFilter() {
@@ -176,7 +177,7 @@ public abstract class GrpcXdsClientImplTestBase {
         }
       };
 
-  private static final FakeClock.TaskFilter LDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
+  protected static final FakeClock.TaskFilter LDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
       new TaskFilter() {
         @Override
         public boolean shouldAccept(Runnable command) {
@@ -184,7 +185,7 @@ public abstract class GrpcXdsClientImplTestBase {
         }
       };
 
-  private static final FakeClock.TaskFilter RDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
+  protected static final FakeClock.TaskFilter RDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
       new TaskFilter() {
         @Override
         public boolean shouldAccept(Runnable command) {
@@ -192,7 +193,7 @@ public abstract class GrpcXdsClientImplTestBase {
         }
       };
 
-  private static final FakeClock.TaskFilter CDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
+  protected static final FakeClock.TaskFilter CDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
       new TaskFilter() {
         @Override
         public boolean shouldAccept(Runnable command) {
@@ -200,7 +201,7 @@ public abstract class GrpcXdsClientImplTestBase {
         }
       };
 
-  private static final FakeClock.TaskFilter EDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
+  protected static final FakeClock.TaskFilter EDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER =
       new FakeClock.TaskFilter() {
         @Override
         public boolean shouldAccept(Runnable command) {
@@ -213,17 +214,17 @@ public abstract class GrpcXdsClientImplTestBase {
   @Rule
   public final MockitoRule mocks = MockitoJUnit.rule();
 
-  private final FakeClock fakeClock = new FakeClock();
+  protected final FakeClock fakeClock = new FakeClock();
   protected final BlockingDeque<DiscoveryRpcCall> resourceDiscoveryCalls =
       new LinkedBlockingDeque<>(1);
   protected final Queue<LrsRpcCall> loadReportCalls = new ArrayDeque<>();
   protected final AtomicBoolean adsEnded = new AtomicBoolean(true);
   protected final AtomicBoolean lrsEnded = new AtomicBoolean(true);
-  private final MessageFactory mf = createMessageFactory();
+  protected final MessageFactory mf = createMessageFactory();
 
   private static final long TIME_INCREMENT = TimeUnit.SECONDS.toNanos(1);
   /** Fake time provider increments time TIME_INCREMENT each call. */
-  private final TimeProvider timeProvider = new TimeProvider() {
+  protected final TimeProvider timeProvider = new TimeProvider() {
     private long count;
     @Override
     public long currentTimeNanos() {
@@ -239,7 +240,7 @@ public abstract class GrpcXdsClientImplTestBase {
       Any.pack(mf.buildListenerWithApiListenerForRds(LDS_RESOURCE, RDS_RESOURCE));
 
   // RDS test resources.
-  private final Any testRouteConfig =
+  protected final Any testRouteConfig =
       Any.pack(mf.buildRouteConfiguration(RDS_RESOURCE, mf.buildOpaqueVirtualHosts(VHOST_SIZE)));
 
   // CDS test resources.
@@ -276,28 +277,29 @@ public abstract class GrpcXdsClientImplTestBase {
   private ArgumentCaptor<Status> errorCaptor;
 
   @Mock
-  private BackoffPolicy.Provider backoffPolicyProvider;
+  protected BackoffPolicy.Provider backoffPolicyProvider;
   @Mock
   private BackoffPolicy backoffPolicy1;
   @Mock
   private BackoffPolicy backoffPolicy2;
   @Mock
-  private ResourceWatcher<LdsUpdate> ldsResourceWatcher;
+  protected ResourceWatcher<LdsUpdate> ldsResourceWatcher;
   @Mock
-  private ResourceWatcher<RdsUpdate> rdsResourceWatcher;
+  protected ResourceWatcher<RdsUpdate> rdsResourceWatcher;
   @Mock
-  private ResourceWatcher<CdsUpdate> cdsResourceWatcher;
+  protected ResourceWatcher<CdsUpdate> cdsResourceWatcher;
   @Mock
-  private ResourceWatcher<EdsUpdate> edsResourceWatcher;
+  protected ResourceWatcher<EdsUpdate> edsResourceWatcher;
   @Mock
-  private XdsClientMetricReporter xdsClientMetricReporter;
+  protected XdsClientMetricReporter xdsClientMetricReporter;
   @Mock
   private ServerConnectionCallback serverConnectionCallback;
 
-  private ManagedChannel channel;
-  private ManagedChannel channelForCustomAuthority;
-  private ManagedChannel channelForEmptyAuthority;
-  private XdsClientImpl xdsClient;
+  protected ManagedChannel channel;
+  protected ManagedChannel channelForCustomAuthority;
+  protected ManagedChannel channelForEmptyAuthority;
+  protected XdsClientImpl xdsClient;
+  protected XdsTransportFactory xdsTransportFactory;
   private boolean originalEnableLeastRequest;
   private Server xdsServer;
   private final String serverName = InProcessServerBuilder.generateName();
@@ -322,7 +324,7 @@ public abstract class GrpcXdsClientImplTestBase {
         .start());
     channel =
         cleanupRule.register(InProcessChannelBuilder.forName(serverName).directExecutor().build());
-    XdsTransportFactory xdsTransportFactory = new XdsTransportFactory() {
+    xdsTransportFactory = new XdsTransportFactory() {
       @Override
       public XdsTransport create(ServerInfo serverInfo) {
         if (serverInfo.target().equals(SERVER_URI)) {
@@ -444,7 +446,7 @@ public abstract class GrpcXdsClientImplTestBase {
     }
   }
 
-  private Map<XdsResourceType<?>, Map<String, ResourceMetadata>>
+  protected Map<XdsResourceType<?>, Map<String, ResourceMetadata>>
       awaitSubscribedResourcesMetadata() {
     try {
       return xdsClient.getSubscribedResourcesMetadataSnapshot().get(20, TimeUnit.SECONDS);
@@ -4241,7 +4243,7 @@ public abstract class GrpcXdsClientImplTestBase {
         .build();
   }
 
-  private <T extends ResourceUpdate> DiscoveryRpcCall startResourceWatcher(
+  protected <T extends ResourceUpdate> DiscoveryRpcCall startResourceWatcher(
       XdsResourceType<T> type, String name, ResourceWatcher<T> watcher, Executor executor) {
     xdsClient.watchXdsResource(type, name, watcher, executor);
     DiscoveryRpcCall call = resourceDiscoveryCalls.poll();
@@ -4272,7 +4274,7 @@ public abstract class GrpcXdsClientImplTestBase {
     return call;
   }
 
-  private <T extends ResourceUpdate> DiscoveryRpcCall startResourceWatcher(
+  protected <T extends ResourceUpdate> DiscoveryRpcCall startResourceWatcher(
       XdsResourceType<T> type, String name, ResourceWatcher<T> watcher) {
     return startResourceWatcher(type, name, watcher, MoreExecutors.directExecutor());
   }
@@ -4326,6 +4328,13 @@ public abstract class GrpcXdsClientImplTestBase {
     protected void sendResponse(XdsResourceType<?> type, Any resource, String versionInfo,
         String nonce) {
       sendResponse(type, ImmutableList.of(resource), versionInfo, nonce);
+    }
+
+    protected void sendResponseWithResourceErrors(
+        XdsResourceType<?> type, List<Any> resources,
+        List<io.envoyproxy.envoy.service.discovery.v3.ResourceError> resourceErrors,
+        String versionInfo, String nonce) {
+      throw new UnsupportedOperationException();
     }
 
     protected void sendError(Throwable t) {

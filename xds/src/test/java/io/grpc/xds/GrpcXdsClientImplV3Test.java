@@ -25,6 +25,8 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoMoreInteractions;
 
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.Iterables;
 import com.google.common.util.concurrent.MoreExecutors;
 import com.google.protobuf.Any;
 import com.google.protobuf.Message;
@@ -101,7 +103,11 @@ import io.grpc.Context.CancellationListener;
 import io.grpc.Status;
 import io.grpc.stub.ServerCallStreamObserver;
 import io.grpc.stub.StreamObserver;
+import io.grpc.xds.XdsListenerResource.LdsUpdate;
+import io.grpc.xds.client.Bootstrapper.ServerInfo;
 import io.grpc.xds.client.EnvoyProtoData;
+import io.grpc.xds.client.XdsClient;
+import io.grpc.xds.client.XdsClient.ResourceWatcher;
 import io.grpc.xds.client.XdsClientImpl;
 import io.grpc.xds.client.XdsResourceType;
 import java.util.ArrayList;
@@ -111,7 +117,9 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import javax.annotation.Nullable;
+import org.junit.Test;
 import org.junit.runner.RunWith;
 import org.junit.runners.Parameterized;
 import org.junit.runners.Parameterized.Parameter;
@@ -234,6 +242,22 @@ public class GrpcXdsClientImplV3Test extends GrpcXdsClientImplTestBase {
           DiscoveryResponse.newBuilder()
               .setVersionInfo(versionInfo)
               .addAllResources(resources)
+              .setTypeUrl(type.typeUrl())
+              .setNonce(nonce)
+              .build();
+      responseObserver.onNext(response);
+    }
+
+    @Override
+    protected void sendResponseWithResourceErrors(
+        XdsResourceType<?> type, List<Any> resources,
+        List<io.envoyproxy.envoy.service.discovery.v3.ResourceError> resourceErrors,
+        String versionInfo, String nonce) {
+      DiscoveryResponse response =
+          DiscoveryResponse.newBuilder()
+              .setVersionInfo(versionInfo)
+              .addAllResources(resources)
+              .addAllResourceErrors(resourceErrors)
               .setTypeUrl(type.typeUrl())
               .setNonce(nonce)
               .build();
@@ -931,5 +955,318 @@ public class GrpcXdsClientImplV3Test extends GrpcXdsClientImplTestBase {
     public void onCompleted() {
       // Ignore
     }
+  }
+
+  @org.junit.After
+  @Override
+  public void tearDown() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = false;
+    super.tearDown();
+  }
+
+  private void initXdsClient(boolean failOnDataErrors, boolean resourceTimerIsTransientError) {
+    xdsClient.shutdown();
+    channel.shutdown();
+
+    String serverName = io.grpc.inprocess.InProcessServerBuilder.generateName();
+    try {
+      cleanupRule.register(
+          io.grpc.inprocess.InProcessServerBuilder.forName(serverName)
+              .directExecutor()
+              .addService(createAdsService())
+              .addService(createLrsService())
+              .build()
+              .start());
+    } catch (java.io.IOException e) {
+      throw new AssertionError(e);
+    }
+    channel = cleanupRule.register(
+        io.grpc.inprocess.InProcessChannelBuilder.forName(serverName).directExecutor().build());
+
+    xdsServerInfo = ServerInfo.create(
+        "trafficdirector.googleapis.com", CHANNEL_CREDENTIALS, ignoreResourceDeletion(),
+        true, failOnDataErrors, resourceTimerIsTransientError);
+
+    io.grpc.xds.client.Bootstrapper.BootstrapInfo bootstrapInfo =
+        io.grpc.xds.client.Bootstrapper.BootstrapInfo.builder()
+            .servers(Collections.singletonList(xdsServerInfo))
+            .node(io.grpc.xds.client.EnvoyProtoData.Node.newBuilder().setId("cool-node-id").build())
+            .authorities(ImmutableMap.of(
+                "authority.xds.com",
+                io.grpc.xds.client.Bootstrapper.AuthorityInfo.create(
+                    "xdstp://authority.xds.com/envoy.config.listener.v3.Listener/%s",
+                    ImmutableList.of(io.grpc.xds.client.Bootstrapper.ServerInfo.create(
+                        "trafficdirector2.googleapis.com", CHANNEL_CREDENTIALS))),
+                "",
+                io.grpc.xds.client.Bootstrapper.AuthorityInfo.create(
+                    "xdstp:///envoy.config.listener.v3.Listener/%s",
+                    ImmutableList.of(io.grpc.xds.client.Bootstrapper.ServerInfo.create(
+                        "trafficdirector3.googleapis.com", CHANNEL_CREDENTIALS)))))
+            .certProviders(ImmutableMap.of("cert-instance-name",
+                io.grpc.xds.client.Bootstrapper.CertificateProviderInfo.create(
+                    "file-watcher", ImmutableMap.<String, Object>of())))
+            .build();
+
+    xdsClient =
+        new io.grpc.xds.client.XdsClientImpl(
+            xdsTransportFactory,
+            bootstrapInfo,
+            fakeClock.getScheduledExecutorService(),
+            backoffPolicyProvider,
+            fakeClock.getStopwatchSupplier(),
+            timeProvider,
+            io.grpc.xds.MessagePrinter.INSTANCE,
+            new io.grpc.xds.internal.security.TlsContextManagerImpl(bootstrapInfo),
+            xdsClientMetricReporter);
+  }
+
+  private static final XdsResourceType<LdsUpdate> LDS = XdsListenerResource.getInstance();
+
+  @Test
+  public void tp3ErrorResponse_failOnDataErrorsFalse_ambientErrorTriggered() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = true;
+    initXdsClient(false, false);
+
+    DiscoveryRpcCall call =
+        startResourceWatcher(LDS, "listener.googleapis.com", ldsResourceWatcher);
+
+    // 1. Send successful LDS update to cache it.
+    Any listener = Any.pack(mf.buildListenerWithApiListener("listener.googleapis.com",
+        mf.buildRouteConfiguration(
+            "route-configuration.googleapis.com", mf.buildOpaqueVirtualHosts(1))));
+    call.sendResponse(LDS, listener, "42", "0001");
+    verify(ldsResourceWatcher).onChanged(Mockito.any(LdsUpdate.class));
+
+    // 2. Send TP3 error response (NOT_FOUND).
+    io.envoyproxy.envoy.service.discovery.v3.ResourceError resourceError =
+        io.envoyproxy.envoy.service.discovery.v3.ResourceError.newBuilder()
+            .setResourceName(io.envoyproxy.envoy.service.discovery.v3.ResourceName.newBuilder()
+                .setName("listener.googleapis.com"))
+            .setErrorDetail(com.google.rpc.Status.newBuilder()
+                .setCode(com.google.rpc.Code.NOT_FOUND_VALUE)
+                .setMessage("TP3 resource not found error"))
+            .build();
+    call.sendResponseWithResourceErrors(
+        LDS, ImmutableList.of(), ImmutableList.of(resourceError), "43", "0002");
+
+    // Since fail_on_data_errors is false, we should keep the cached resource
+    // and notify the watcher via onAmbientError.
+    verify(ldsResourceWatcher).onAmbientError(argThat(status ->
+        status.getCode() == Status.Code.NOT_FOUND
+            && status.getDescription().contains("TP3 resource not found error")));
+    
+    // Verify metadata state is RECEIVED_ERROR and cached is true
+    XdsClient.ResourceMetadata metadata =
+        awaitSubscribedResourcesMetadata().get(LDS).get("listener.googleapis.com");
+    assertThat(metadata.getStatus())
+        .isEqualTo(XdsClient.ResourceMetadata.ResourceMetadataStatus.RECEIVED_ERROR);
+    assertThat(metadata.isCached()).isTrue();
+  }
+
+  @Test
+  public void tp3ErrorResponse_failOnDataErrorsTrue_hardErrorTriggered() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = true;
+    initXdsClient(true, false);
+
+    DiscoveryRpcCall call =
+        startResourceWatcher(LDS, "listener.googleapis.com", ldsResourceWatcher);
+
+    // 1. Send successful LDS update to cache it.
+    Any listener = Any.pack(mf.buildListenerWithApiListener("listener.googleapis.com",
+        mf.buildRouteConfiguration(
+            "route-configuration.googleapis.com", mf.buildOpaqueVirtualHosts(1))));
+    call.sendResponse(LDS, listener, "42", "0001");
+    verify(ldsResourceWatcher).onChanged(Mockito.any(LdsUpdate.class));
+
+    // 2. Send TP3 error response (NOT_FOUND).
+    io.envoyproxy.envoy.service.discovery.v3.ResourceError resourceError =
+        io.envoyproxy.envoy.service.discovery.v3.ResourceError.newBuilder()
+            .setResourceName(io.envoyproxy.envoy.service.discovery.v3.ResourceName.newBuilder()
+                .setName("listener.googleapis.com"))
+            .setErrorDetail(com.google.rpc.Status.newBuilder()
+                .setCode(com.google.rpc.Code.NOT_FOUND_VALUE)
+                .setMessage("TP3 resource not found error"))
+            .build();
+    call.sendResponseWithResourceErrors(
+        LDS, ImmutableList.of(), ImmutableList.of(resourceError), "43", "0002");
+
+    // Since fail_on_data_errors is true and it's NOT_FOUND (a data error),
+    // we should clear the cache and call onError.
+    verify(ldsResourceWatcher).onError(argThat(status ->
+        status.getCode() == Status.Code.NOT_FOUND
+            && status.getDescription().contains("TP3 resource not found error")));
+    
+    // Verify metadata state is RECEIVED_ERROR and cached is false
+    XdsClient.ResourceMetadata metadata =
+        awaitSubscribedResourcesMetadata().get(LDS).get("listener.googleapis.com");
+    assertThat(metadata.getStatus())
+        .isEqualTo(XdsClient.ResourceMetadata.ResourceMetadataStatus.RECEIVED_ERROR);
+    assertThat(metadata.isCached()).isFalse();
+
+    // Verify a new watcher receives onError
+    @SuppressWarnings("unchecked")
+    ResourceWatcher<LdsUpdate> newWatcher = mock(ResourceWatcher.class);
+    xdsClient.watchXdsResource(XdsListenerResource.getInstance(), "listener.googleapis.com",
+        newWatcher, MoreExecutors.directExecutor());
+    verify(newWatcher).onError(argThat(status ->
+        status.getCode() == Status.Code.NOT_FOUND
+            && status.getDescription().contains("TP3 resource not found error")));
+  }
+
+  @Test
+  public void tp3ErrorResponse_failOnDataErrorsTrue_nonDataError_ambientErrorTriggered() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = true;
+    initXdsClient(true, false);
+
+    DiscoveryRpcCall call =
+        startResourceWatcher(LDS, "listener.googleapis.com", ldsResourceWatcher);
+
+    // 1. Send successful LDS update to cache it.
+    Any listener = Any.pack(mf.buildListenerWithApiListener("listener.googleapis.com",
+        mf.buildRouteConfiguration(
+            "route-configuration.googleapis.com", mf.buildOpaqueVirtualHosts(1))));
+    call.sendResponse(LDS, listener, "42", "0001");
+    verify(ldsResourceWatcher).onChanged(Mockito.any(LdsUpdate.class));
+
+    // 2. Send TP3 error response (INTERNAL - a non-data error).
+    io.envoyproxy.envoy.service.discovery.v3.ResourceError resourceError =
+        io.envoyproxy.envoy.service.discovery.v3.ResourceError.newBuilder()
+            .setResourceName(io.envoyproxy.envoy.service.discovery.v3.ResourceName.newBuilder()
+                .setName("listener.googleapis.com"))
+            .setErrorDetail(com.google.rpc.Status.newBuilder()
+                .setCode(com.google.rpc.Code.INTERNAL_VALUE)
+                .setMessage("TP3 internal error"))
+            .build();
+    call.sendResponseWithResourceErrors(
+        LDS, ImmutableList.of(), ImmutableList.of(resourceError), "43", "0002");
+
+    // Even if fail_on_data_errors is true, non-data errors should NOT clear cache,
+    // should call onAmbientError.
+    verify(ldsResourceWatcher).onAmbientError(argThat(status ->
+        status.getCode() == Status.Code.INTERNAL
+            && status.getDescription().contains("TP3 internal error")));
+    
+    // Verify metadata state is RECEIVED_ERROR and cached is true
+    XdsClient.ResourceMetadata metadata =
+        awaitSubscribedResourcesMetadata().get(LDS).get("listener.googleapis.com");
+    assertThat(metadata.getStatus())
+        .isEqualTo(XdsClient.ResourceMetadata.ResourceMetadataStatus.RECEIVED_ERROR);
+    assertThat(metadata.isCached()).isTrue();
+  }
+
+  @Test
+  public void onAbsent_ldsCdsIgnoredByDefault() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = true;
+    initXdsClient(false, false);
+
+    DiscoveryRpcCall call =
+        startResourceWatcher(LDS, "listener.googleapis.com", ldsResourceWatcher);
+
+    // 1. Send successful LDS update to cache it.
+    Any listener = Any.pack(mf.buildListenerWithApiListener("listener.googleapis.com",
+        mf.buildRouteConfiguration(
+            "route-configuration.googleapis.com", mf.buildOpaqueVirtualHosts(1))));
+    call.sendResponse(LDS, listener, "42", "0001");
+    verify(ldsResourceWatcher).onChanged(Mockito.any(LdsUpdate.class));
+
+    // 2. Send an update omitting the LDS resource (meaning it is absent/deleted).
+    call.sendResponse(LDS, ImmutableList.<Any>of(), "43", "0002");
+
+    // Deletion of LDS should be ignored by default when fail_on_data_errors is false.
+    // It should trigger onAmbientError.
+    verify(ldsResourceWatcher).onAmbientError(argThat(status ->
+        status.getCode() == Status.Code.NOT_FOUND
+            && status.getDescription().contains("absent from the server response")));
+    
+    // Verify metadata state is DOES_NOT_EXIST and cached is true
+    XdsClient.ResourceMetadata metadata =
+        awaitSubscribedResourcesMetadata().get(LDS).get("listener.googleapis.com");
+    assertThat(metadata.getStatus())
+        .isEqualTo(XdsClient.ResourceMetadata.ResourceMetadataStatus.DOES_NOT_EXIST);
+    assertThat(metadata.isCached()).isTrue();
+  }
+
+  @Test
+  public void onAbsent_ldsCdsHardErrorIfFailOnDataErrors() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = true;
+    initXdsClient(true, false);
+
+    DiscoveryRpcCall call =
+        startResourceWatcher(LDS, "listener.googleapis.com", ldsResourceWatcher);
+
+    // 1. Send successful LDS update to cache it.
+    Any listener = Any.pack(mf.buildListenerWithApiListener("listener.googleapis.com",
+        mf.buildRouteConfiguration(
+            "route-configuration.googleapis.com", mf.buildOpaqueVirtualHosts(1))));
+    call.sendResponse(LDS, listener, "42", "0001");
+    verify(ldsResourceWatcher).onChanged(Mockito.any(LdsUpdate.class));
+
+    // 2. Send an update omitting the LDS resource.
+    call.sendResponse(LDS, ImmutableList.<Any>of(), "43", "0002");
+
+    // Deletion of LDS should result in hard error when fail_on_data_errors is true.
+    verify(ldsResourceWatcher).onResourceDoesNotExist("listener.googleapis.com");
+    
+    // Verify metadata state is DOES_NOT_EXIST and cached is false
+    XdsClient.ResourceMetadata metadata =
+        awaitSubscribedResourcesMetadata().get(LDS).get("listener.googleapis.com");
+    assertThat(metadata.getStatus())
+        .isEqualTo(XdsClient.ResourceMetadata.ResourceMetadataStatus.DOES_NOT_EXIST);
+    assertThat(metadata.isCached()).isFalse();
+  }
+
+  @Test
+  public void handleStreamClosed_ambientErrorToCachedResources() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = true;
+    initXdsClient(false, false);
+
+    DiscoveryRpcCall call =
+        startResourceWatcher(LDS, "listener.googleapis.com", ldsResourceWatcher);
+
+    // 1. Send successful LDS update to cache it.
+    Any listener = Any.pack(mf.buildListenerWithApiListener("listener.googleapis.com",
+        mf.buildRouteConfiguration(
+            "route-configuration.googleapis.com", mf.buildOpaqueVirtualHosts(1))));
+    call.sendResponse(LDS, listener, "42", "0001");
+    verify(ldsResourceWatcher).onChanged(Mockito.any(LdsUpdate.class));
+
+    // 2. Close stream with an error.
+    call.sendError(Status.UNAVAILABLE.withDescription("Connection reset").asException());
+
+    // Stream closure should propagate as onAmbientError because we have cached data.
+    verify(ldsResourceWatcher).onAmbientError(argThat(status ->
+        status.getCode() == Status.Code.UNAVAILABLE
+            && status.getDescription().contains("Connection reset")));
+  }
+
+  @Test
+  public void restartTimer_30SecondTimeoutIfTransientErrorActive() {
+    io.grpc.xds.client.BootstrapperImpl.enableXdsDataErrorHandling = true;
+    initXdsClient(false, true); // resourceTimerIsTransientError = true
+
+    // Watch LDS resource. Do not use startResourceWatcher because it asserts 15s delay.
+    xdsClient.watchXdsResource(XdsListenerResource.getInstance(), "listener.googleapis.com",
+        ldsResourceWatcher, MoreExecutors.directExecutor());
+    DiscoveryRpcCall call = resourceDiscoveryCalls.poll();
+    assertThat(call).isNotNull();
+
+    // Verify that the delay is 30 seconds
+    io.grpc.internal.FakeClock.ScheduledTask timeoutTask =
+        Iterables.getOnlyElement(fakeClock.getPendingTasks(LDS_RESOURCE_FETCH_TIMEOUT_TASK_FILTER));
+    assertThat(timeoutTask.getDelay(TimeUnit.SECONDS)).isEqualTo(30);
+
+    // Trigger timeout
+    fakeClock.forwardTime(30, TimeUnit.SECONDS);
+
+    // Watcher should receive UNAVAILABLE status
+    verify(ldsResourceWatcher).onError(argThat(status ->
+        status.getCode() == Status.Code.UNAVAILABLE
+            && status.getDescription().contains("initial fetch timeout (30s)")));
+
+    // Metadata should transition to TIMEOUT
+    XdsClient.ResourceMetadata metadata =
+        awaitSubscribedResourcesMetadata().get(LDS).get("listener.googleapis.com");
+    assertThat(metadata.getStatus())
+        .isEqualTo(XdsClient.ResourceMetadata.ResourceMetadataStatus.TIMEOUT);
   }
 }

@@ -465,8 +465,9 @@ public abstract class XdsClient {
     /** Called when a xds response is received. */
     void handleResourceResponse(
         XdsResourceType<?> resourceType, ServerInfo serverInfo, String versionInfo,
-        List<Any> resources, String nonce, boolean isFirstResponse,
-        ProcessingTracker processingTracker);
+        List<Any> resources,
+        List<io.envoyproxy.envoy.service.discovery.v3.ResourceError> resourceErrors,
+        String nonce, boolean isFirstResponse, ProcessingTracker processingTracker);
 
     /** Called when the ADS stream is closed passively. */
     // Must be synchronized.

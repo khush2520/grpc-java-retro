@@ -543,7 +543,9 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
 
   @SuppressWarnings("unchecked")
   private <T extends ResourceUpdate> void handleResourceUpdate(
-      XdsResourceType.Args args, List<Any> resources, XdsResourceType<T> xdsResourceType,
+      XdsResourceType.Args args, List<Any> resources,
+      List<io.envoyproxy.envoy.service.discovery.v3.ResourceError> resourceErrors,
+      XdsResourceType<T> xdsResourceType,
       boolean isFirstResponse, ProcessingTracker processingTracker) {
     ControlPlaneClient controlPlaneClient = serverCpClientMap.get(args.serverInfo);
 
@@ -575,11 +577,34 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
     }
 
     long updateTime = timeProvider.currentTimeNanos();
+
+    Map<String, Status> resourceErrorsMap = new HashMap<>();
+    if (BootstrapperImpl.enableXdsDataErrorHandling && resourceErrors != null) {
+      for (io.envoyproxy.envoy.service.discovery.v3.ResourceError resourceError : resourceErrors) {
+        if (resourceError.hasResourceName() && resourceError.hasErrorDetail()) {
+          String resourceName = resourceError.getResourceName().getName();
+          com.google.rpc.Status errorDetailProto = resourceError.getErrorDetail();
+          Status status = Status.fromCodeValue(errorDetailProto.getCode());
+          if (errorDetailProto.getMessage() != null && !errorDetailProto.getMessage().isEmpty()) {
+            status = status.withDescription(errorDetailProto.getMessage());
+          }
+          resourceErrorsMap.put(resourceName, status);
+        }
+      }
+    }
+
     Map<String, ResourceSubscriber<? extends ResourceUpdate>> subscribedResources =
         resourceSubscribers.getOrDefault(xdsResourceType, Collections.emptyMap());
     for (Map.Entry<String, ResourceSubscriber<?>> entry : subscribedResources.entrySet()) {
       String resourceName = entry.getKey();
       ResourceSubscriber<T> subscriber = (ResourceSubscriber<T>) entry.getValue();
+
+      if (resourceErrorsMap.containsKey(resourceName)) {
+        subscriber.onTp3Error(resourceErrorsMap.get(resourceName), args.serverInfo,
+            args.versionInfo, updateTime, processingTracker);
+        continue;
+      }
+
       if (parsedResources.containsKey(resourceName)) {
         // Happy path: the resource updated successfully. Notify the watchers of the update.
         subscriber.onData(parsedResources.get(resourceName), args.versionInfo, updateTime,
@@ -675,6 +700,10 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
     private ResourceMetadata metadata;
     @Nullable
     private String errorDescription;
+    @Nullable
+    private Status ambientError;
+    @Nullable
+    private Status resourceError;
 
     ResourceSubscriber(XdsResourceType<T> type, String resource) {
       syncContext.throwIfNotInThisSynchronizationContext();
@@ -711,12 +740,21 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
       watchers.put(watcher, watcherExecutor);
       T savedData = data;
       boolean savedAbsent = absent;
+      Status savedAmbientError = ambientError;
+      Status savedResourceError = resourceError;
       watcherExecutor.execute(() -> {
         if (errorDescription != null) {
           watcher.onError(Status.INVALID_ARGUMENT.withDescription(errorDescription));
           return;
         }
-        if (savedData != null) {
+        if (savedResourceError != null) {
+          watcher.onError(savedResourceError);
+        } else if (savedAmbientError != null) {
+          if (savedData != null) {
+            notifyWatcher(watcher, savedData);
+          }
+          watcher.onAmbientError(savedAmbientError);
+        } else if (savedData != null) {
           notifyWatcher(watcher, savedData);
         } else if (savedAbsent) {
           watcher.onResourceDoesNotExist(resource);
@@ -745,7 +783,17 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
           logger.log(XdsLogLevel.INFO, "{0} resource {1} initial fetch timeout",
               type, resource);
           respTimer = null;
-          onAbsent(null, activeCpc.getServerInfo());
+          if (BootstrapperImpl.enableXdsDataErrorHandling
+              && activeCpc.getServerInfo().resourceTimerIsTransientError()) {
+            metadata = ResourceMetadata.newResourceMetadataTimeout(
+                metadata, "", timeProvider.currentTimeNanos(), "Initial fetch timeout", false);
+            Status timeoutError = Status.UNAVAILABLE.withDescription(
+                "Resource " + resource + " initial fetch timeout (30s) from "
+                    + activeCpc.getServerInfo().target());
+            onError(timeoutError, null);
+          } else {
+            onAbsent(null, activeCpc.getServerInfo());
+          }
         }
 
         @Override
@@ -760,8 +808,13 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
       if (respTimer != null) {
         respTimer.cancel();
       }
+      long timeoutSec = INITIAL_RESOURCE_FETCH_TIMEOUT_SEC;
+      if (BootstrapperImpl.enableXdsDataErrorHandling
+          && activeCpc.getServerInfo().resourceTimerIsTransientError()) {
+        timeoutSec = 30;
+      }
       respTimer = syncContext.schedule(
-          new ResourceNotFound(), INITIAL_RESOURCE_FETCH_TIMEOUT_SEC, TimeUnit.SECONDS,
+          new ResourceNotFound(), timeoutSec, TimeUnit.SECONDS,
           timeService);
     }
 
@@ -800,6 +853,10 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
         respTimer.cancel();
         respTimer = null;
       }
+      if (BootstrapperImpl.enableXdsDataErrorHandling) {
+        ambientError = null;
+        resourceError = null;
+      }
       ResourceUpdate oldData = this.data;
       this.data = parsedResource.getResourceUpdate();
       this.metadata = ResourceMetadata
@@ -837,10 +894,45 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
         return;
       }
 
+      if (BootstrapperImpl.enableXdsDataErrorHandling) {
+        boolean failOnDataErrors = serverInfo.failOnDataErrors();
+        boolean isLdsOrCds = type.typeName().equals("LDS") || type.typeName().equals("CDS");
+        if (isLdsOrCds && !failOnDataErrors && data != null) {
+          if (!resourceDeletionIgnored) {
+            logger.log(XdsLogLevel.FORCE_WARNING,
+                "xds server {0}: ignoring deletion for resource type {1} name {2}",
+                serverInfo.target(), type, resource);
+            resourceDeletionIgnored = true;
+          }
+          String description = "Resource " + resource + " is absent from the server response.";
+          Status ambientErrorStatus = Status.NOT_FOUND
+              .withDescription(description + " nodeID: " + bootstrapInfo.node().getId());
+          ambientError = ambientErrorStatus;
+          metadata = ResourceMetadata.newResourceMetadataDoesNotExist(true);
+          for (ResourceWatcher<T> watcher : watchers.keySet()) {
+            if (processingTracker != null) {
+              processingTracker.startTask();
+            }
+            watchers.get(watcher).execute(() -> {
+              try {
+                watcher.onAmbientError(ambientErrorStatus);
+              } finally {
+                if (processingTracker != null) {
+                  processingTracker.onComplete();
+                }
+              }
+            });
+          }
+          return;
+        }
+      }
+
       // Ignore deletion of State of the World resources when this feature is on,
       // and the resource is reusable.
       boolean ignoreResourceDeletionEnabled = serverInfo.ignoreResourceDeletion();
-      if (ignoreResourceDeletionEnabled && type.isFullStateOfTheWorld() && data != null) {
+      boolean isLdsOrCds = type.typeName().equals("LDS") || type.typeName().equals("CDS");
+      if (ignoreResourceDeletionEnabled && type.isFullStateOfTheWorld() && data != null
+          && !(BootstrapperImpl.enableXdsDataErrorHandling && isLdsOrCds)) {
         if (!resourceDeletionIgnored) {
           logger.log(XdsLogLevel.FORCE_WARNING,
               "xds server {0}: ignoring deletion for resource type {1} name {2}}",
@@ -854,6 +946,8 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
       if (!absent) {
         data = null;
         absent = true;
+        ambientError = null;
+        resourceError = null;
         metadata = ResourceMetadata.newResourceMetadataDoesNotExist();
         for (ResourceWatcher<T> watcher : watchers.keySet()) {
           if (processingTracker != null) {
@@ -885,6 +979,11 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
           .withDescription(description + "nodeID: " + bootstrapInfo.node().getId())
           .withCause(error.getCause());
 
+      if (BootstrapperImpl.enableXdsDataErrorHandling) {
+        ambientError = null;
+        resourceError = errorAugmented;
+      }
+
       for (ResourceWatcher<T> watcher : watchers.keySet()) {
         if (tracker != null) {
           tracker.startTask();
@@ -898,6 +997,121 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
             }
           }
         });
+      }
+    }
+
+    void onTp3Error(Status error, ServerInfo serverInfo, String version, long updateTime,
+                    @Nullable ProcessingTracker processingTracker) {
+      if (respTimer != null && respTimer.isPending()) {
+        respTimer.cancel();
+        respTimer = null;
+      }
+
+      boolean failOnDataErrors = serverInfo.failOnDataErrors();
+      Status.Code code = error.getCode();
+      boolean isDataError = code == Status.Code.NOT_FOUND || code == Status.Code.PERMISSION_DENIED;
+
+      // Include node ID in xds failures to allow cross-referencing with control plane logs
+      // when debugging.
+      String description = error.getDescription() == null ? "" : error.getDescription() + " ";
+      Status errorAugmented = Status.fromCode(error.getCode())
+          .withDescription(description + "nodeID: " + bootstrapInfo.node().getId())
+          .withCause(error.getCause());
+
+      if (failOnDataErrors && isDataError) {
+        data = null;
+        absent = false;
+        metadata = ResourceMetadata.newResourceMetadataReceivedError(
+            metadata, version, updateTime, error.getDescription(), false);
+        resourceError = errorAugmented;
+        ambientError = null;
+
+        for (ResourceWatcher<T> watcher : watchers.keySet()) {
+          if (processingTracker != null) {
+            processingTracker.startTask();
+          }
+          watchers.get(watcher).execute(() -> {
+            try {
+              watcher.onError(errorAugmented);
+            } finally {
+              if (processingTracker != null) {
+                processingTracker.onComplete();
+              }
+            }
+          });
+        }
+      } else {
+        metadata = ResourceMetadata.newResourceMetadataReceivedError(
+            metadata, version, updateTime, error.getDescription(), data != null);
+        if (data != null) {
+          ambientError = errorAugmented;
+          resourceError = null;
+          for (ResourceWatcher<T> watcher : watchers.keySet()) {
+            if (processingTracker != null) {
+              processingTracker.startTask();
+            }
+            watchers.get(watcher).execute(() -> {
+              try {
+                watcher.onAmbientError(errorAugmented);
+              } finally {
+                if (processingTracker != null) {
+                  processingTracker.onComplete();
+                }
+              }
+            });
+          }
+        } else {
+          resourceError = errorAugmented;
+          ambientError = null;
+          for (ResourceWatcher<T> watcher : watchers.keySet()) {
+            if (processingTracker != null) {
+              processingTracker.startTask();
+            }
+            watchers.get(watcher).execute(() -> {
+              try {
+                watcher.onError(errorAugmented);
+              } finally {
+                if (processingTracker != null) {
+                  processingTracker.onComplete();
+                }
+              }
+            });
+          }
+        }
+      }
+    }
+
+    void onConnectionError(Status error) {
+      if (respTimer != null && respTimer.isPending()) {
+        respTimer.cancel();
+        respTimer = null;
+      }
+
+      // Include node ID in xds failures to allow cross-referencing with control plane logs
+      // when debugging.
+      String description = error.getDescription() == null ? "" : error.getDescription() + " ";
+      Status errorAugmented = Status.fromCode(error.getCode())
+          .withDescription(description + "nodeID: " + bootstrapInfo.node().getId())
+          .withCause(error.getCause());
+
+      if (BootstrapperImpl.enableXdsDataErrorHandling && data != null) {
+        ambientError = errorAugmented;
+        resourceError = null;
+        for (ResourceWatcher<T> watcher : watchers.keySet()) {
+          watchers.get(watcher).execute(() -> {
+            watcher.onAmbientError(errorAugmented);
+          });
+        }
+      } else {
+        if (BootstrapperImpl.enableXdsDataErrorHandling) {
+          resourceError = errorAugmented;
+          ambientError = null;
+        }
+        for (ResourceWatcher<T> watcher : watchers.keySet()) {
+          watchers.get(watcher).execute(() -> {
+            watcher.onError(errorAugmented);
+          });
+        }
       }
     }
 
@@ -922,8 +1136,9 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
     @Override
     public void handleResourceResponse(
         XdsResourceType<?> xdsResourceType, ServerInfo serverInfo, String versionInfo,
-        List<Any> resources, String nonce, boolean isFirstResponse,
-        ProcessingTracker processingTracker) {
+        List<Any> resources,
+        List<io.envoyproxy.envoy.service.discovery.v3.ResourceError> resourceErrors,
+        String nonce, boolean isFirstResponse, ProcessingTracker processingTracker) {
       checkNotNull(xdsResourceType, "xdsResourceType");
       syncContext.throwIfNotInThisSynchronizationContext();
       Set<String> toParseResourceNames =
@@ -932,7 +1147,8 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
           : null;
       XdsResourceType.Args args = new XdsResourceType.Args(serverInfo, versionInfo, nonce,
           bootstrapInfo, securityConfig, toParseResourceNames);
-      handleResourceUpdate(args, resources, xdsResourceType, isFirstResponse, processingTracker);
+      handleResourceUpdate(
+          args, resources, resourceErrors, xdsResourceType, isFirstResponse, processingTracker);
     }
 
     @Override
@@ -958,12 +1174,25 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
       for (Map<String, ResourceSubscriber<? extends ResourceUpdate>> subscriberMap :
           resourceSubscribers.values()) {
         for (ResourceSubscriber<? extends ResourceUpdate> subscriber : subscriberMap.values()) {
-          if (subscriber.hasResult() || !authoritiesForClosedCpc.contains(subscriber.authority)) {
+          if (!authoritiesForClosedCpc.contains(subscriber.authority)) {
+            continue;
+          }
+
+          if (BootstrapperImpl.enableXdsDataErrorHandling && subscriber.data != null) {
+            subscriber.onConnectionError(status);
+            continue;
+          }
+
+          if (!shouldTryFallback) {
+            continue;
+          }
+
+          if (subscriber.hasResult()) {
             continue;
           }
 
           // try to fallback to lower priority control plane client
-          if (shouldTryFallback && manageControlPlaneClient(subscriber).didFallback) {
+          if (manageControlPlaneClient(subscriber).didFallback) {
             authoritiesForClosedCpc.remove(subscriber.authority);
             if (authoritiesForClosedCpc.isEmpty()) {
               return; // optimization: no need to continue once all authorities have done fallback
@@ -971,7 +1200,11 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
             continue; // since we did fallback, don't consider it an error
           }
 
-          subscriber.onError(status, null);
+          if (BootstrapperImpl.enableXdsDataErrorHandling) {
+            subscriber.onConnectionError(status);
+          } else {
+            subscriber.onError(status, null);
+          }
         }
       }
     }
