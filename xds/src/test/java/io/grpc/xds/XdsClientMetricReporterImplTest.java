@@ -260,6 +260,17 @@ public class XdsClientMetricReporterImplTest {
             nanosLastUpdate, "nacked after request", false));
     rdsResourceMetadataMap.put("xdstp://authority6",
         ResourceMetadata.newResourceMetadataDoesNotExist());
+    rdsResourceMetadataMap.put("xdstp://authority8",
+        ResourceMetadata.newResourceMetadataReceivedError(requestedRdsResourceMetadata, "30",
+            nanosLastUpdate, "received error after request", false));
+    rdsResourceMetadataMap.put("xdstp://authority9",
+        ResourceMetadata.newResourceMetadataReceivedError(ackedLdsResource, "31",
+            nanosLastUpdate, "received error after ack", true));
+    rdsResourceMetadataMap.put("xdstp://authority10",
+        ResourceMetadata.newResourceMetadataTimeout(requestedRdsResourceMetadata, "32",
+            nanosLastUpdate, "timeout after request", false));
+    rdsResourceMetadataMap.put("xdstp://authority11",
+        ResourceMetadata.newResourceMetadataDoesNotExist(true));
 
     Map<String, ResourceMetadata> cdsResourceMetadataMap = new HashMap<>();
     cdsResourceMetadataMap.put("xdstp://authority7", ResourceMetadata.newResourceMetadataUnknown());
@@ -270,7 +281,7 @@ public class XdsClientMetricReporterImplTest {
 
     SettableFuture<Void> reportServerConnectionsCompleted = SettableFuture.create();
     reportServerConnectionsCompleted.set(null);
-    when(mockXdsClient.reportServerConnections(any(MetricReporterCallback.class)))
+    when(mockXdsClient.reportServerConnections(any(ServerConnectionCallback.class)))
         .thenReturn(reportServerConnectionsCompleted);
 
     ListenableFuture<Map<XdsResourceType<?>, Map<String, ResourceMetadata>>>
@@ -303,6 +314,28 @@ public class XdsClientMetricReporterImplTest {
     verify(mockBatchRecorder).recordLongGauge(eqMetricInstrumentName("grpc.xds_client.resources"),
         eq(1L),
         eq(Arrays.asList(target, "authority6", "does_not_exist", routeConfigResource.typeUrl())),
+        any());
+    // RDS resource received error
+    verify(mockBatchRecorder).recordLongGauge(eqMetricInstrumentName("grpc.xds_client.resources"),
+        eq(1L),
+        eq(Arrays.asList(target, "authority8", "received_error", routeConfigResource.typeUrl())),
+        any());
+    // RDS resource received error but cached
+    verify(mockBatchRecorder).recordLongGauge(eqMetricInstrumentName("grpc.xds_client.resources"),
+        eq(1L),
+        eq(Arrays.asList(target, "authority9", "received_error_but_cached",
+            routeConfigResource.typeUrl())),
+        any());
+    // RDS resource timeout
+    verify(mockBatchRecorder).recordLongGauge(eqMetricInstrumentName("grpc.xds_client.resources"),
+        eq(1L),
+        eq(Arrays.asList(target, "authority10", "timeout", routeConfigResource.typeUrl())),
+        any());
+    // RDS resource does not exist but cached
+    verify(mockBatchRecorder).recordLongGauge(eqMetricInstrumentName("grpc.xds_client.resources"),
+        eq(1L),
+        eq(Arrays.asList(target, "authority11", "does_not_exist_but_cached",
+            routeConfigResource.typeUrl())),
         any());
 
     // CDS resource unknown

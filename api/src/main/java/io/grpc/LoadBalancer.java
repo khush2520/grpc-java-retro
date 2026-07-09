@@ -135,6 +135,9 @@ public abstract class LoadBalancer {
   public static final Attributes.Key<Boolean> IS_PETIOLE_POLICY =
       Attributes.Key.create("io.grpc.IS_PETIOLE_POLICY");
 
+  public static final Attributes.Key<String> ATTR_RESOLUTION_NOTE =
+      Attributes.Key.create("io.grpc.RESOLUTION_NOTE");
+
   /**
    * A picker that always returns an erring pick.
    *

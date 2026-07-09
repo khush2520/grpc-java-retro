@@ -156,6 +156,12 @@ public abstract class XdsClient {
     void onError(Status error);
 
     /**
+     * Called when the resource discovery RPC encounters some ambient error, but the watcher
+     * still has cached data.
+     */
+    default void onAmbientError(Status error) {}
+
+    /**
      * Called when the requested resource is not available.
      *
      * @param resourceName name of the resource requested in discovery request.
@@ -196,7 +202,11 @@ public abstract class XdsClient {
     }
 
     public static ResourceMetadata newResourceMetadataDoesNotExist() {
-      return new ResourceMetadata(ResourceMetadataStatus.DOES_NOT_EXIST, "", 0, false, null, null);
+      return newResourceMetadataDoesNotExist(false);
+    }
+
+    public static ResourceMetadata newResourceMetadataDoesNotExist(boolean cached) {
+      return new ResourceMetadata(ResourceMetadataStatus.DOES_NOT_EXIST, "", 0, cached, null, null);
     }
 
     public static ResourceMetadata newResourceMetadataAcked(
@@ -211,6 +221,24 @@ public abstract class XdsClient {
         String failedDetails, boolean cached) {
       checkNotNull(metadata, "metadata");
       return new ResourceMetadata(ResourceMetadataStatus.NACKED,
+          metadata.getVersion(), metadata.getUpdateTimeNanos(), cached, metadata.getRawResource(),
+          new UpdateFailureState(failedVersion, failedUpdateTime, failedDetails));
+    }
+
+    public static ResourceMetadata newResourceMetadataReceivedError(
+        ResourceMetadata metadata, String failedVersion, long failedUpdateTime,
+        String failedDetails, boolean cached) {
+      checkNotNull(metadata, "metadata");
+      return new ResourceMetadata(ResourceMetadataStatus.RECEIVED_ERROR,
+          metadata.getVersion(), metadata.getUpdateTimeNanos(), cached, metadata.getRawResource(),
+          new UpdateFailureState(failedVersion, failedUpdateTime, failedDetails));
+    }
+
+    public static ResourceMetadata newResourceMetadataTimeout(
+        ResourceMetadata metadata, String failedVersion, long failedUpdateTime,
+        String failedDetails, boolean cached) {
+      checkNotNull(metadata, "metadata");
+      return new ResourceMetadata(ResourceMetadataStatus.TIMEOUT,
           metadata.getVersion(), metadata.getUpdateTimeNanos(), cached, metadata.getRawResource(),
           new UpdateFailureState(failedVersion, failedUpdateTime, failedDetails));
     }
@@ -256,7 +284,7 @@ public abstract class XdsClient {
      * config_dump.proto</a>
      */
     public enum ResourceMetadataStatus {
-      UNKNOWN, REQUESTED, DOES_NOT_EXIST, ACKED, NACKED
+      UNKNOWN, REQUESTED, DOES_NOT_EXIST, ACKED, NACKED, RECEIVED_ERROR, TIMEOUT
     }
 
     /**

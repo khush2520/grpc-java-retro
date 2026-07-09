@@ -898,6 +898,68 @@ public class GrpcBootstrapperImplTest {
     }
   }
 
+  @Test
+  public void serverFeatureDataErrorHandling_enabled() throws XdsInitializationException {
+    boolean originalValue = BootstrapperImpl.enableXdsDataErrorHandling;
+    BootstrapperImpl.enableXdsDataErrorHandling = true;
+    try {
+      String rawData = "{\n"
+          + "  \"xds_servers\": [\n"
+          + "    {\n"
+          + "      \"server_uri\": \"" + SERVER_URI + "\",\n"
+          + "      \"channel_creds\": [\n"
+          + "        {\"type\": \"insecure\"}\n"
+          + "      ],\n"
+          + "      \"server_features\": [\n"
+          + "        \"fail_on_data_errors\",\n"
+          + "        \"resource_timer_is_transient_error\"\n"
+          + "      ]\n"
+          + "    }\n"
+          + "  ]\n"
+          + "}";
+
+      bootstrapper.setFileReader(createFileReader(BOOTSTRAP_FILE_PATH, rawData));
+      BootstrapInfo info = bootstrapper.bootstrap();
+      ServerInfo serverInfo = Iterables.getOnlyElement(info.servers());
+      assertThat(serverInfo.target()).isEqualTo(SERVER_URI);
+      assertThat(serverInfo.failOnDataErrors()).isTrue();
+      assertThat(serverInfo.resourceTimerIsTransientError()).isTrue();
+    } finally {
+      BootstrapperImpl.enableXdsDataErrorHandling = originalValue;
+    }
+  }
+
+  @Test
+  public void serverFeatureDataErrorHandling_disabled() throws XdsInitializationException {
+    boolean originalValue = BootstrapperImpl.enableXdsDataErrorHandling;
+    BootstrapperImpl.enableXdsDataErrorHandling = false;
+    try {
+      String rawData = "{\n"
+          + "  \"xds_servers\": [\n"
+          + "    {\n"
+          + "      \"server_uri\": \"" + SERVER_URI + "\",\n"
+          + "      \"channel_creds\": [\n"
+          + "        {\"type\": \"insecure\"}\n"
+          + "      ],\n"
+          + "      \"server_features\": [\n"
+          + "        \"fail_on_data_errors\",\n"
+          + "        \"resource_timer_is_transient_error\"\n"
+          + "      ]\n"
+          + "    }\n"
+          + "  ]\n"
+          + "}";
+
+      bootstrapper.setFileReader(createFileReader(BOOTSTRAP_FILE_PATH, rawData));
+      BootstrapInfo info = bootstrapper.bootstrap();
+      ServerInfo serverInfo = Iterables.getOnlyElement(info.servers());
+      assertThat(serverInfo.target()).isEqualTo(SERVER_URI);
+      assertThat(serverInfo.failOnDataErrors()).isFalse();
+      assertThat(serverInfo.resourceTimerIsTransientError()).isFalse();
+    } finally {
+      BootstrapperImpl.enableXdsDataErrorHandling = originalValue;
+    }
+  }
+
   private static BootstrapperImpl.FileReader createFileReader(
       final String expectedPath, final String rawData) {
     return new BootstrapperImpl.FileReader() {

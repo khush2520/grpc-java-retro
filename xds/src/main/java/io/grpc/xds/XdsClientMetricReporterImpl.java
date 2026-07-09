@@ -196,11 +196,15 @@ final class XdsClientMetricReporterImpl implements XdsClientMetricReporter {
       case REQUESTED:
         return "requested";
       case DOES_NOT_EXIST:
-        return "does_not_exist";
+        return isResourceCached ? "does_not_exist_but_cached" : "does_not_exist";
       case ACKED:
         return "acked";
       case NACKED:
         return isResourceCached ? "nacked_but_cached" : "nacked";
+      case RECEIVED_ERROR:
+        return isResourceCached ? "received_error_but_cached" : "received_error";
+      case TIMEOUT:
+        return "timeout";
       default:
         return "unknown";
     }
