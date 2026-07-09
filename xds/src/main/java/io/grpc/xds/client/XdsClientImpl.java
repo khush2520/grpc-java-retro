@@ -51,6 +51,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executor;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -85,9 +87,9 @@ public final class XdsClientImpl extends XdsClient implements XdsResponseHandler
       new HashMap<>();
 
   private final Map<ServerInfo, ControlPlaneClient> serverCpClientMap = new HashMap<>();
-  private final Map<XdsResourceType<? extends ResourceUpdate>,
-      Map<String, ResourceSubscriber<? extends ResourceUpdate>>>
-      resourceSubscribers = new HashMap<>();
+  private final ConcurrentMap<XdsResourceType<? extends ResourceUpdate>,
+      ConcurrentMap<String, ResourceSubscriber<? extends ResourceUpdate>>>
+      resourceSubscribers = new ConcurrentHashMap<>();
   private final Map<String, XdsResourceType<?>> subscribedResourceTypeUrls = new HashMap<>();
   private final XdsTransportFactory xdsTransportFactory;
   private final Bootstrapper.BootstrapInfo bootstrapInfo;
@@ -203,7 +205,10 @@ public final class XdsClientImpl extends XdsClient implements XdsResponseHandler
   public Collection<String> getSubscribedResources(ServerInfo serverInfo,
                                                    XdsResourceType<? extends ResourceUpdate> type) {
     Map<String, ResourceSubscriber<? extends ResourceUpdate>> resources =
-        resourceSubscribers.getOrDefault(type, Collections.emptyMap());
+        resourceSubscribers.get(type);
+    if (resources == null) {
+      resources = Collections.emptyMap();
+    }
     ImmutableSet.Builder<String> builder = ImmutableSet.builder();
     for (String key : resources.keySet()) {
       if (resources.get(key).serverInfo.equals(serverInfo)) {
@@ -242,6 +247,26 @@ public final class XdsClientImpl extends XdsClient implements XdsResponseHandler
   }
 
   @Override
+  @SuppressWarnings("unchecked")
+  public <T extends ResourceUpdate> Map<String, T> getSubscribedResourceData(
+      XdsResourceType<T> type) {
+    ConcurrentMap<String, ResourceSubscriber<? extends ResourceUpdate>> subscribers =
+        resourceSubscribers.get(type);
+    if (subscribers == null) {
+      return Collections.emptyMap();
+    }
+    ImmutableMap.Builder<String, T> builder = ImmutableMap.builder();
+    for (Map.Entry<String, ResourceSubscriber<? extends ResourceUpdate>> entry :
+        subscribers.entrySet()) {
+      T val = (T) entry.getValue().data;
+      if (val != null) {
+        builder.put(entry.getKey(), val);
+      }
+    }
+    return builder.buildOrThrow();
+  }
+
+  @Override
   public Object getSecurityConfig() {
     return securityConfig;
   }
@@ -256,7 +281,7 @@ public final class XdsClientImpl extends XdsClient implements XdsResponseHandler
       @SuppressWarnings("unchecked")
       public void run() {
         if (!resourceSubscribers.containsKey(type)) {
-          resourceSubscribers.put(type, new HashMap<>());
+          resourceSubscribers.put(type, new ConcurrentHashMap<>());
           subscribedResourceTypeUrls.put(type.typeUrl(), type);
         }
         ResourceSubscriber<T> subscriber =
@@ -464,7 +489,10 @@ public final class XdsClientImpl extends XdsClient implements XdsResponseHandler
 
     long updateTime = timeProvider.currentTimeNanos();
     Map<String, ResourceSubscriber<? extends ResourceUpdate>> subscribedResources =
-        resourceSubscribers.getOrDefault(xdsResourceType, Collections.emptyMap());
+        resourceSubscribers.get(xdsResourceType);
+    if (subscribedResources == null) {
+      subscribedResources = Collections.emptyMap();
+    }
     for (Map.Entry<String, ResourceSubscriber<?>> entry : subscribedResources.entrySet()) {
       String resourceName = entry.getKey();
       ResourceSubscriber<T> subscriber = (ResourceSubscriber<T>) entry.getValue();
@@ -513,7 +541,7 @@ public final class XdsClientImpl extends XdsClient implements XdsResponseHandler
     private final XdsResourceType<T> type;
     private final String resource;
     private final Map<ResourceWatcher<T>, Executor> watchers = new HashMap<>();
-    @Nullable private T data;
+    @Nullable private volatile T data;
     private boolean absent;
     // Tracks whether the deletion has been ignored per bootstrap server feature.
     // See https://github.com/grpc/proposal/blob/master/A53-xds-ignore-resource-deletion.md

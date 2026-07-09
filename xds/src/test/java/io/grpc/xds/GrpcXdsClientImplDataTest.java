@@ -2340,9 +2340,12 @@ public class GrpcXdsClientImplDataTest {
           cluster, null, LRS_SERVER_INFO,
           LoadBalancerRegistry.getDefaultRegistry());
 
-      assertThat(update.metadata()).containsKey("envoy.extensions.filters.http.gcp_authn.v3.Audience");
-      FilterMetadataValue value = update.metadata().get("envoy.extensions.filters.http.gcp_authn.v3.Audience");
-      assertThat(value.typeUrl()).isEqualTo("type.googleapis.com/envoy.extensions.filters.http.gcp_authn.v3.Audience");
+      assertThat(update.metadata())
+          .containsKey("envoy.extensions.filters.http.gcp_authn.v3.Audience");
+      FilterMetadataValue value =
+          update.metadata().get("envoy.extensions.filters.http.gcp_authn.v3.Audience");
+      assertThat(value.typeUrl())
+          .isEqualTo("type.googleapis.com/envoy.extensions.filters.http.gcp_authn.v3.Audience");
       assertThat(value.value()).isEqualTo("https://foo.bar");
     } finally {
       if (origProp != null) {

@@ -429,4 +429,9 @@ public abstract class XdsClient {
 
     Map<String, XdsResourceType<?>> getSubscribedResourceTypesWithTypeUrl();
   }
+
+  public <T extends ResourceUpdate> Map<String, T> getSubscribedResourceData(
+      XdsResourceType<T> type) {
+    return Collections.emptyMap();
+  }
 }

@@ -63,6 +63,13 @@ interface Filter {
     Filter newInstance();
 
     /**
+     * Creates a new instance of the filter with the given instance name.
+     */
+    default Filter newInstance(String name) {
+      return newInstance();
+    }
+
+    /**
      * Parses the top-level filter config from raw proto message. The message may be either a {@link
      * com.google.protobuf.Any} or a {@link com.google.protobuf.Struct}.
      */

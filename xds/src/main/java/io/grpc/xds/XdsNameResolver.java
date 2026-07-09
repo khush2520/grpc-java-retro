@@ -94,6 +94,8 @@ final class XdsNameResolver extends NameResolver {
 
   static final CallOptions.Key<String> CLUSTER_SELECTION_KEY =
       CallOptions.Key.create("io.grpc.xds.CLUSTER_SELECTION_KEY");
+  static final CallOptions.Key<XdsConfig> XDS_CONFIG_CALL_OPTION_KEY =
+      CallOptions.Key.create("io.grpc.xds.XDS_CONFIG_CALL_OPTION_KEY");
   static final CallOptions.Key<Long> RPC_HASH_KEY =
       CallOptions.Key.create("io.grpc.xds.RPC_HASH_KEY");
   static final CallOptions.Key<Boolean> AUTO_HOST_REWRITE_KEY =
@@ -455,7 +457,7 @@ final class XdsNameResolver extends NameResolver {
         for (NamedFilterConfig namedFilter : routingCfg.filterChain) {
           FilterConfig filterConfig = namedFilter.filterConfig;
           Filter.Provider provider = filterRegistry.get(filterConfig.typeUrl());
-          Filter filter = provider == null ? null : provider.newInstance();
+          Filter filter = provider == null ? null : provider.newInstance(namedFilter.name);
           if (filter instanceof ClientInterceptorBuilder) {
             ClientInterceptor interceptor = ((ClientInterceptorBuilder) filter)
                 .buildClientInterceptor(
@@ -475,9 +477,19 @@ final class XdsNameResolver extends NameResolver {
         public <ReqT, RespT> ClientCall<ReqT, RespT> interceptCall(
             final MethodDescriptor<ReqT, RespT> method, CallOptions callOptions,
             final Channel next) {
+          XdsConfig xdsConfig = null;
+          if (xdsClient != null) {
+            Map<String, XdsClusterResource.CdsUpdate> cdsUpdates =
+                xdsClient.getSubscribedResourceData(XdsClusterResource.getInstance());
+            xdsConfig = new XdsConfig(cdsUpdates);
+          }
           CallOptions callOptionsForCluster =
               callOptions.withOption(CLUSTER_SELECTION_KEY, finalCluster)
                   .withOption(RPC_HASH_KEY, hash);
+          if (xdsConfig != null) {
+            callOptionsForCluster =
+                callOptionsForCluster.withOption(XDS_CONFIG_CALL_OPTION_KEY, xdsConfig);
+          }
           if (finalSelectedRoute.routeAction().autoHostRewrite()) {
             callOptionsForCluster = callOptionsForCluster.withOption(AUTO_HOST_REWRITE_KEY, true);
           }
@@ -509,7 +521,7 @@ final class XdsNameResolver extends NameResolver {
         }
       }
 
-      filterInterceptors.add(new ClusterSelectionInterceptor());
+      filterInterceptors.add(0, new ClusterSelectionInterceptor());
       return
           Result.newBuilder()
               .setConfig(config)
