@@ -387,7 +387,7 @@ public abstract class XdsClient {
    */
   public LoadStatsManager2.ClusterLocalityStats addClusterLocalityStats(
       Bootstrapper.ServerInfo serverInfo, String clusterName, @Nullable String edsServiceName,
-      Locality locality) {
+      Locality locality, BackendMetricPropagation backendMetricPropagation) {
     throw new UnsupportedOperationException();
   }
 

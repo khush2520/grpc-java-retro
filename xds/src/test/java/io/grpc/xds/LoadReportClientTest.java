@@ -51,6 +51,7 @@ import io.grpc.internal.BackoffPolicy;
 import io.grpc.internal.FakeClock;
 import io.grpc.stub.StreamObserver;
 import io.grpc.testing.GrpcCleanupRule;
+import io.grpc.xds.client.BackendMetricPropagation;
 import io.grpc.xds.client.EnvoyProtoData;
 import io.grpc.xds.client.LoadReportClient;
 import io.grpc.xds.client.LoadStatsManager2;
@@ -205,7 +206,8 @@ public class LoadReportClientTest {
       dropStats2.recordDroppedRequest("throttle");
     }
     ClusterLocalityStats localityStats1 =
-        loadStatsManager.getClusterLocalityStats(CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1);
+        loadStatsManager.getClusterLocalityStats(CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1,
+            BackendMetricPropagation.OLD_BEHAVIOR);
     for (int i = 0; i < 31; i++) {
       localityStats1.recordCallStarted();
     }
@@ -213,7 +215,8 @@ public class LoadReportClientTest {
     localityStats1.recordBackendLoadMetricStats(ImmutableMap.of("named1", 1.618));
     localityStats1.recordBackendLoadMetricStats(ImmutableMap.of("named1", -2.718));
     ClusterLocalityStats localityStats2 =
-        loadStatsManager.getClusterLocalityStats(CLUSTER2, EDS_SERVICE_NAME2, LOCALITY2);
+        loadStatsManager.getClusterLocalityStats(CLUSTER2, EDS_SERVICE_NAME2, LOCALITY2,
+            BackendMetricPropagation.OLD_BEHAVIOR);
     for (int i = 0; i < 45; i++) {
       localityStats2.recordCallStarted();
     }

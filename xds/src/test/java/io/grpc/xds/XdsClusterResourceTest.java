@@ -41,14 +41,17 @@ import org.junit.runners.JUnit4;
 @RunWith(JUnit4.class)
 public class XdsClusterResourceTest {
 
+  private boolean originalFlagValue;
+
   @Before
   public void setUp() {
+    originalFlagValue = XdsClusterResource.isEnabledOrcaLrsPropagation;
     XdsClusterResource.isEnabledOrcaLrsPropagation = true;
   }
 
   @After
   public void tearDown() {
-    XdsClusterResource.isEnabledOrcaLrsPropagation = true;
+    XdsClusterResource.isEnabledOrcaLrsPropagation = originalFlagValue;
   }
 
   @Test

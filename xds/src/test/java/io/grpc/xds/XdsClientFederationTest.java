@@ -27,6 +27,7 @@ import io.grpc.MetricRecorder;
 import io.grpc.internal.ObjectPool;
 import io.grpc.xds.Filter.NamedFilterConfig;
 import io.grpc.xds.XdsListenerResource.LdsUpdate;
+import io.grpc.xds.client.BackendMetricPropagation;
 import io.grpc.xds.client.Bootstrapper.ServerInfo;
 import io.grpc.xds.client.LoadReportClient;
 import io.grpc.xds.client.LoadStatsManager2;
@@ -148,7 +149,7 @@ public class XdsClientFederationTest {
     // corresponding LRS client should be started
     for (Entry<ServerInfo, LoadReportClient> entry : xdsClient.getServerLrsClientMap().entrySet()) {
       xdsClient.addClusterLocalityStats(entry.getKey(), "clusterName", "edsServiceName",
-          Locality.create("", "", ""));
+          Locality.create("", "", ""), BackendMetricPropagation.OLD_BEHAVIOR);
       waitForSyncContext(xdsClient);
       assertThat(entry.getValue().lrsStreamIsNull()).isFalse();
     }

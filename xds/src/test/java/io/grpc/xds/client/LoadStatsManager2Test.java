@@ -22,6 +22,9 @@ import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Iterables;
 import io.grpc.Status;
 import io.grpc.internal.FakeClock;
+import io.grpc.services.InternalCallMetricRecorder;
+import io.grpc.services.MetricReport;
+import io.grpc.xds.client.BackendMetricPropagation;
 import io.grpc.xds.client.LoadStatsManager2.ClusterDropStats;
 import io.grpc.xds.client.LoadStatsManager2.ClusterLocalityStats;
 import io.grpc.xds.client.Stats.ClusterStats;
@@ -63,11 +66,11 @@ public class LoadStatsManager2Test {
     ClusterDropStats dropCounter2 = loadStatsManager.getClusterDropStats(
         CLUSTER_NAME1, EDS_SERVICE_NAME2);
     ClusterLocalityStats loadCounter1 = loadStatsManager.getClusterLocalityStats(
-        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1);
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, BackendMetricPropagation.OLD_BEHAVIOR);
     ClusterLocalityStats loadCounter2 = loadStatsManager.getClusterLocalityStats(
-        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY2);
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY2, BackendMetricPropagation.OLD_BEHAVIOR);
     ClusterLocalityStats loadCounter3 = loadStatsManager.getClusterLocalityStats(
-        CLUSTER_NAME2, null, LOCALITY3);
+        CLUSTER_NAME2, null, LOCALITY3, BackendMetricPropagation.OLD_BEHAVIOR);
     dropCounter1.recordDroppedRequest("lb");
     dropCounter1.recordDroppedRequest("throttle");
     for (int i = 0; i < 19; i++) {
@@ -220,9 +223,9 @@ public class LoadStatsManager2Test {
   @Test
   public void sharedLoadCounterStatsAggregation() {
     ClusterLocalityStats ref1 = loadStatsManager.getClusterLocalityStats(
-        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1);
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, BackendMetricPropagation.OLD_BEHAVIOR);
     ClusterLocalityStats ref2 = loadStatsManager.getClusterLocalityStats(
-        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1);
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, BackendMetricPropagation.OLD_BEHAVIOR);
     ref1.recordCallStarted();
     ref1.recordBackendLoadMetricStats(ImmutableMap.of("named1", 1.618));
     ref1.recordBackendLoadMetricStats(ImmutableMap.of("named1", 3.14159));
@@ -257,7 +260,7 @@ public class LoadStatsManager2Test {
   @Test
   public void loadCounterDelayedDeletionAfterAllInProgressRequestsReported() {
     ClusterLocalityStats counter = loadStatsManager.getClusterLocalityStats(
-        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1);
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, BackendMetricPropagation.OLD_BEHAVIOR);
     counter.recordCallStarted();
     counter.recordCallStarted();
     counter.recordBackendLoadMetricStats(ImmutableMap.of("named1", 2.718));
@@ -300,6 +303,118 @@ public class LoadStatsManager2Test {
     assertThat(localityStats.loadMetricStatsMap().isEmpty()).isTrue();
 
     assertThat(loadStatsManager.getClusterStatsReports(CLUSTER_NAME1)).isEmpty();
+  }
+
+  @Test
+  public void recordAndGetReport_withBackendMetricPropagation_propagateAll() {
+    BackendMetricPropagation propagation = BackendMetricPropagation.create(
+        /* cpuUtilization= */ true,
+        /* memUtilization= */ true,
+        /* applicationUtilization= */ true,
+        /* namedMetricsAll= */ true,
+        /* namedMetricKeys= */ com.google.common.collect.ImmutableSet.of(),
+        /* isOldBehavior= */ false);
+
+    ClusterLocalityStats loadCounter = loadStatsManager.getClusterLocalityStats(
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
+
+    loadCounter.recordCallStarted();
+    MetricReport report = InternalCallMetricRecorder.createMetricReport(
+        0.5, 0.4, 0.3, 1, 0, new java.util.HashMap<>(), new java.util.HashMap<>(),
+        ImmutableMap.of("named1", 3.14));
+    loadCounter.recordBackendLoadMetrics(report);
+    loadCounter.recordCallFinished(Status.OK);
+
+    ClusterStats stats = Iterables.getOnlyElement(
+        loadStatsManager.getClusterStatsReports(CLUSTER_NAME1));
+    UpstreamLocalityStats localityStats =
+        Iterables.getOnlyElement(stats.upstreamLocalityStatsList());
+
+    assertThat(localityStats.cpuUtilization()).isNotNull();
+    assertThat(localityStats.cpuUtilization().numRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(localityStats.cpuUtilization().totalMetricValue()).isWithin(TOLERANCE).of(0.5);
+
+    assertThat(localityStats.memUtilization()).isNotNull();
+    assertThat(localityStats.memUtilization().numRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(localityStats.memUtilization().totalMetricValue()).isWithin(TOLERANCE).of(0.3);
+
+    assertThat(localityStats.applicationUtilization()).isNotNull();
+    assertThat(localityStats.applicationUtilization().numRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(localityStats.applicationUtilization().totalMetricValue())
+        .isWithin(TOLERANCE).of(0.4);
+
+    assertThat(localityStats.loadMetricStatsMap()).containsKey("named1");
+    assertThat(localityStats.loadMetricStatsMap().get("named1").numRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(localityStats.loadMetricStatsMap().get("named1").totalMetricValue())
+        .isWithin(TOLERANCE).of(3.14);
+  }
+
+  @Test
+  public void recordAndGetReport_withBackendMetricPropagation_propagateNone() {
+    BackendMetricPropagation propagation = BackendMetricPropagation.PROPAGATE_NONE;
+
+    ClusterLocalityStats loadCounter = loadStatsManager.getClusterLocalityStats(
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
+
+    loadCounter.recordCallStarted();
+    MetricReport report = InternalCallMetricRecorder.createMetricReport(
+        0.5, 0.4, 0.3, 1, 0, new java.util.HashMap<>(), new java.util.HashMap<>(),
+        ImmutableMap.of("named1", 3.14));
+    loadCounter.recordBackendLoadMetrics(report);
+    loadCounter.recordCallFinished(Status.OK);
+
+    ClusterStats stats = Iterables.getOnlyElement(
+        loadStatsManager.getClusterStatsReports(CLUSTER_NAME1));
+    UpstreamLocalityStats localityStats =
+        Iterables.getOnlyElement(stats.upstreamLocalityStatsList());
+
+    assertThat(localityStats.cpuUtilization()).isNull();
+    assertThat(localityStats.memUtilization()).isNull();
+    assertThat(localityStats.applicationUtilization()).isNull();
+    assertThat(localityStats.loadMetricStatsMap()).isEmpty();
+  }
+
+  @Test
+  public void recordAndGetReport_withBackendMetricPropagation_filterNamedMetrics() {
+    BackendMetricPropagation propagation = BackendMetricPropagation.create(
+        /* cpuUtilization= */ true,
+        /* memUtilization= */ false,
+        /* applicationUtilization= */ false,
+        /* namedMetricsAll= */ false,
+        /* namedMetricKeys= */ com.google.common.collect.ImmutableSet.of("named1", "named2"),
+        /* isOldBehavior= */ false);
+
+    ClusterLocalityStats loadCounter = loadStatsManager.getClusterLocalityStats(
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
+
+    loadCounter.recordCallStarted();
+    MetricReport report = InternalCallMetricRecorder.createMetricReport(
+        0.5, 0.4, 0.3, 1, 0, new java.util.HashMap<>(), new java.util.HashMap<>(),
+        ImmutableMap.of("named1", 3.14, "named3", 9.99));
+    loadCounter.recordBackendLoadMetrics(report);
+    loadCounter.recordCallFinished(Status.OK);
+
+    ClusterStats stats = Iterables.getOnlyElement(
+        loadStatsManager.getClusterStatsReports(CLUSTER_NAME1));
+    UpstreamLocalityStats localityStats =
+        Iterables.getOnlyElement(stats.upstreamLocalityStatsList());
+
+    assertThat(localityStats.cpuUtilization()).isNotNull();
+    assertThat(localityStats.cpuUtilization().numRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(localityStats.cpuUtilization().totalMetricValue()).isWithin(TOLERANCE).of(0.5);
+
+    assertThat(localityStats.memUtilization()).isNull();
+    assertThat(localityStats.applicationUtilization()).isNull();
+
+    assertThat(localityStats.loadMetricStatsMap()).containsKey("named1");
+    assertThat(localityStats.loadMetricStatsMap().get("named1").numRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(localityStats.loadMetricStatsMap().get("named1").totalMetricValue())
+        .isWithin(TOLERANCE).of(3.14);
+
+    assertThat(localityStats.loadMetricStatsMap()).doesNotContainKey("named3");
   }
 
   @Nullable

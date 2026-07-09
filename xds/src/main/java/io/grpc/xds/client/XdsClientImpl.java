@@ -408,10 +408,11 @@ public final class XdsClientImpl extends XdsClient implements ResourceStore {
   @Override
   public LoadStatsManager2.ClusterLocalityStats addClusterLocalityStats(
       final ServerInfo serverInfo, String clusterName, @Nullable String edsServiceName,
-      Locality locality) {
+      Locality locality, BackendMetricPropagation backendMetricPropagation) {
     LoadStatsManager2 loadStatsManager = loadStatsManagerMap.get(serverInfo);
     LoadStatsManager2.ClusterLocalityStats loadCounter =
-        loadStatsManager.getClusterLocalityStats(clusterName, edsServiceName, locality);
+        loadStatsManager.getClusterLocalityStats(
+            clusterName, edsServiceName, locality, backendMetricPropagation);
     syncContext.execute(new Runnable() {
       @Override
       public void run() {

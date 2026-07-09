@@ -19,12 +19,14 @@ package io.grpc.xds.client;
 import static com.google.common.base.Preconditions.checkNotNull;
 import static com.google.common.base.Preconditions.checkState;
 
+import com.google.auto.value.AutoValue;
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.base.Stopwatch;
 import com.google.common.base.Supplier;
 import com.google.common.collect.Sets;
 import io.grpc.Internal;
 import io.grpc.Status;
+import io.grpc.services.MetricReport;
 import io.grpc.xds.client.Stats.BackendLoadMetricStats;
 import io.grpc.xds.client.Stats.ClusterStats;
 import io.grpc.xds.client.Stats.DroppedRequests;
@@ -55,7 +57,7 @@ public final class LoadStatsManager2 {
       new HashMap<>();
   // Recorders for loads of each cluster:edsServiceName:locality.
   private final Map<String, Map<String,
-      Map<Locality, ReferenceCounted<ClusterLocalityStats>>>> allLoadStats = new HashMap<>();
+      Map<LocalityKey, ReferenceCounted<ClusterLocalityStats>>>> allLoadStats = new HashMap<>();
   private final Supplier<Stopwatch> stopwatchSupplier;
 
   @VisibleForTesting
@@ -104,40 +106,43 @@ public final class LoadStatsManager2 {
    */
   @VisibleForTesting
   public synchronized ClusterLocalityStats getClusterLocalityStats(
-      String cluster, @Nullable String edsServiceName, Locality locality) {
+      String cluster, @Nullable String edsServiceName, Locality locality,
+      BackendMetricPropagation backendMetricPropagation) {
     if (!allLoadStats.containsKey(cluster)) {
       allLoadStats.put(
           cluster,
-          new HashMap<String, Map<Locality, ReferenceCounted<ClusterLocalityStats>>>());
+          new HashMap<String, Map<LocalityKey, ReferenceCounted<ClusterLocalityStats>>>());
     }
-    Map<String, Map<Locality, ReferenceCounted<ClusterLocalityStats>>> perClusterCounters =
+    Map<String, Map<LocalityKey, ReferenceCounted<ClusterLocalityStats>>> perClusterCounters =
         allLoadStats.get(cluster);
     if (!perClusterCounters.containsKey(edsServiceName)) {
       perClusterCounters.put(
-          edsServiceName, new HashMap<Locality, ReferenceCounted<ClusterLocalityStats>>());
+          edsServiceName, new HashMap<LocalityKey, ReferenceCounted<ClusterLocalityStats>>());
     }
-    Map<Locality, ReferenceCounted<ClusterLocalityStats>> localityStats =
+    Map<LocalityKey, ReferenceCounted<ClusterLocalityStats>> localityStats =
         perClusterCounters.get(edsServiceName);
-    if (!localityStats.containsKey(locality)) {
+    LocalityKey localityKey = LocalityKey.create(locality, backendMetricPropagation);
+    if (!localityStats.containsKey(localityKey)) {
       localityStats.put(
-          locality,
+          localityKey,
           ReferenceCounted.wrap(new ClusterLocalityStats(
-              cluster, edsServiceName, locality, stopwatchSupplier.get())));
+              cluster, edsServiceName, locality, backendMetricPropagation,
+              stopwatchSupplier.get())));
     }
-    ReferenceCounted<ClusterLocalityStats> ref = localityStats.get(locality);
+    ReferenceCounted<ClusterLocalityStats> ref = localityStats.get(localityKey);
     ref.retain();
     return ref.get();
   }
 
   private synchronized void releaseClusterLocalityLoadCounter(
-      String cluster, @Nullable String edsServiceName, Locality locality) {
+      String cluster, @Nullable String edsServiceName, LocalityKey localityKey) {
     checkState(allLoadStats.containsKey(cluster)
             && allLoadStats.get(cluster).containsKey(edsServiceName)
-            && allLoadStats.get(cluster).get(edsServiceName).containsKey(locality),
-        "stats for cluster %s, edsServiceName %s, locality %s not exits",
-        cluster, edsServiceName, locality);
+            && allLoadStats.get(cluster).get(edsServiceName).containsKey(localityKey),
+        "stats for cluster %s, edsServiceName %s, localityKey %s not exits",
+        cluster, edsServiceName, localityKey);
     ReferenceCounted<ClusterLocalityStats> ref =
-        allLoadStats.get(cluster).get(edsServiceName).get(locality);
+        allLoadStats.get(cluster).get(edsServiceName).get(localityKey);
     ref.release();
   }
 
@@ -152,7 +157,7 @@ public final class LoadStatsManager2 {
       return Collections.emptyList();
     }
     Map<String, ReferenceCounted<ClusterDropStats>> clusterDropStats = allDropStats.get(cluster);
-    Map<String, Map<Locality, ReferenceCounted<ClusterLocalityStats>>> clusterLoadStats =
+    Map<String, Map<LocalityKey, ReferenceCounted<ClusterLocalityStats>>> clusterLoadStats =
         allLoadStats.get(cluster);
     Map<String, ClusterStats.Builder> statsReportBuilders = new HashMap<>();
     // Populate drop stats.
@@ -192,19 +197,20 @@ public final class LoadStatsManager2 {
           }
           statsReportBuilders.put(edsServiceName, builder);
         }
-        Map<Locality, ReferenceCounted<ClusterLocalityStats>> localityStats =
+        Map<LocalityKey, ReferenceCounted<ClusterLocalityStats>> localityStats =
             clusterLoadStats.get(edsServiceName);
-        Set<Locality> localitiesToDiscard = new HashSet<>();
-        for (Locality locality : localityStats.keySet()) {
-          ReferenceCounted<ClusterLocalityStats> ref = localityStats.get(locality);
+        Set<LocalityKey> localitiesToDiscard = new HashSet<>();
+        for (LocalityKey localityKey : localityStats.keySet()) {
+          ReferenceCounted<ClusterLocalityStats> ref = localityStats.get(localityKey);
           ClusterLocalityStatsSnapshot snapshot = ref.get().snapshot();
           // Only discard stats object after all in-flight calls under recording had finished.
           if (ref.getReferenceCount() == 0 && snapshot.callsInProgress == 0) {
-            localitiesToDiscard.add(locality);
+            localitiesToDiscard.add(localityKey);
           }
           UpstreamLocalityStats upstreamLocalityStats = UpstreamLocalityStats.create(
-              locality, snapshot.callsIssued, snapshot.callsSucceeded, snapshot.callsFailed,
-              snapshot.callsInProgress, snapshot.loadMetricStatsMap);
+              localityKey.locality(), snapshot.callsIssued, snapshot.callsSucceeded,
+              snapshot.callsFailed, snapshot.callsInProgress, snapshot.loadMetricStatsMap,
+              snapshot.cpuStats, snapshot.memStats, snapshot.appStats);
           builder.addUpstreamLocalityStats(upstreamLocalityStats);
           // Use the max (drops/loads) recording interval as the overall interval for the
           // cluster's stats. In general, they should be mostly identical.
@@ -315,6 +321,18 @@ public final class LoadStatsManager2 {
     }
   }
 
+  @AutoValue
+  public abstract static class LocalityKey {
+    public abstract Locality locality();
+
+    public abstract BackendMetricPropagation backendMetricPropagation();
+
+    public static LocalityKey create(
+        Locality locality, BackendMetricPropagation backendMetricPropagation) {
+      return new AutoValue_LoadStatsManager2_LocalityKey(locality, backendMetricPropagation);
+    }
+  }
+
   /**
    * Recorder for client loads. One instance per locality (in cluster with edsService).
    */
@@ -324,19 +342,28 @@ public final class LoadStatsManager2 {
     @Nullable
     private final String edsServiceName;
     private final Locality locality;
+    private final BackendMetricPropagation backendMetricPropagation;
     private final Stopwatch stopwatch;
     private final AtomicLong callsInProgress = new AtomicLong();
     private final AtomicLong callsSucceeded = new AtomicLong();
     private final AtomicLong callsFailed = new AtomicLong();
     private final AtomicLong callsIssued = new AtomicLong();
     private Map<String, BackendLoadMetricStats> loadMetricStatsMap = new HashMap<>();
+    @Nullable
+    private BackendLoadMetricStats cpuStats;
+    @Nullable
+    private BackendLoadMetricStats memStats;
+    @Nullable
+    private BackendLoadMetricStats appStats;
 
     private ClusterLocalityStats(
         String clusterName, @Nullable String edsServiceName, Locality locality,
-        Stopwatch stopwatch) {
+        BackendMetricPropagation backendMetricPropagation, Stopwatch stopwatch) {
       this.clusterName = checkNotNull(clusterName, "clusterName");
       this.edsServiceName = edsServiceName;
       this.locality = checkNotNull(locality, "locality");
+      this.backendMetricPropagation =
+          checkNotNull(backendMetricPropagation, "backendMetricPropagation");
       this.stopwatch = checkNotNull(stopwatch, "stopwatch");
       stopwatch.reset().start();
     }
@@ -370,12 +397,45 @@ public final class LoadStatsManager2 {
      */
     public synchronized void recordBackendLoadMetricStats(Map<String, Double> namedMetrics) {
       namedMetrics.forEach((name, value) -> {
-        if (!loadMetricStatsMap.containsKey(name)) {
-          loadMetricStatsMap.put(name, new BackendLoadMetricStats(1, value));
-        } else {
-          loadMetricStatsMap.get(name).addMetricValueAndIncrementRequestsFinished(value);
+        if (backendMetricPropagation.shouldPropagateNamedMetric(name)) {
+          if (!loadMetricStatsMap.containsKey(name)) {
+            loadMetricStatsMap.put(name, new BackendLoadMetricStats(1, value));
+          } else {
+            loadMetricStatsMap.get(name).addMetricValueAndIncrementRequestsFinished(value);
+          }
         }
       });
+    }
+
+    /**
+     * Records CPU, memory, application, and custom named backend load metrics.
+     */
+    public synchronized void recordBackendLoadMetrics(MetricReport report) {
+      if (backendMetricPropagation.cpuUtilization() && report.getCpuUtilization() > 0) {
+        if (cpuStats == null) {
+          cpuStats = new BackendLoadMetricStats(1, report.getCpuUtilization());
+        } else {
+          cpuStats.addMetricValueAndIncrementRequestsFinished(report.getCpuUtilization());
+        }
+      }
+      if (backendMetricPropagation.memUtilization() && report.getMemoryUtilization() > 0) {
+        if (memStats == null) {
+          memStats = new BackendLoadMetricStats(1, report.getMemoryUtilization());
+        } else {
+          memStats.addMetricValueAndIncrementRequestsFinished(
+              report.getMemoryUtilization());
+        }
+      }
+      if (backendMetricPropagation.applicationUtilization()
+          && report.getApplicationUtilization() > 0) {
+        if (appStats == null) {
+          appStats = new BackendLoadMetricStats(1, report.getApplicationUtilization());
+        } else {
+          appStats.addMetricValueAndIncrementRequestsFinished(
+              report.getApplicationUtilization());
+        }
+      }
+      recordBackendLoadMetricStats(report.getNamedMetrics());
     }
 
     /**
@@ -386,19 +446,29 @@ public final class LoadStatsManager2 {
      */
     public void release() {
       LoadStatsManager2.this.releaseClusterLocalityLoadCounter(
-          clusterName, edsServiceName, locality);
+          clusterName, edsServiceName, LocalityKey.create(locality, backendMetricPropagation));
     }
 
     private ClusterLocalityStatsSnapshot snapshot() {
       long duration = stopwatch.elapsed(TimeUnit.NANOSECONDS);
       stopwatch.reset().start();
       Map<String, BackendLoadMetricStats> loadMetricStatsMapCopy;
+      BackendLoadMetricStats cpuStatsCopy;
+      BackendLoadMetricStats memStatsCopy;
+      BackendLoadMetricStats appStatsCopy;
       synchronized (this) {
         loadMetricStatsMapCopy = Collections.unmodifiableMap(loadMetricStatsMap);
         loadMetricStatsMap = new HashMap<>();
+        cpuStatsCopy = cpuStats;
+        cpuStats = null;
+        memStatsCopy = memStats;
+        memStats = null;
+        appStatsCopy = appStats;
+        appStats = null;
       }
       return new ClusterLocalityStatsSnapshot(callsSucceeded.getAndSet(0), callsInProgress.get(),
-          callsFailed.getAndSet(0), callsIssued.getAndSet(0), duration, loadMetricStatsMapCopy);
+          callsFailed.getAndSet(0), callsIssued.getAndSet(0), duration, loadMetricStatsMapCopy,
+          cpuStatsCopy, memStatsCopy, appStatsCopy);
     }
   }
 
@@ -409,10 +479,19 @@ public final class LoadStatsManager2 {
     private final long callsIssued;
     private final long durationNano;
     private final Map<String, BackendLoadMetricStats> loadMetricStatsMap;
+    @Nullable
+    private final BackendLoadMetricStats cpuStats;
+    @Nullable
+    private final BackendLoadMetricStats memStats;
+    @Nullable
+    private final BackendLoadMetricStats appStats;
 
     private ClusterLocalityStatsSnapshot(
         long callsSucceeded, long callsInProgress, long callsFailed, long callsIssued,
-        long durationNano, Map<String, BackendLoadMetricStats> loadMetricStatsMap) {
+        long durationNano, Map<String, BackendLoadMetricStats> loadMetricStatsMap,
+        @Nullable BackendLoadMetricStats cpuStats,
+        @Nullable BackendLoadMetricStats memStats,
+        @Nullable BackendLoadMetricStats appStats) {
       this.callsSucceeded = callsSucceeded;
       this.callsInProgress = callsInProgress;
       this.callsFailed = callsFailed;
@@ -420,6 +499,9 @@ public final class LoadStatsManager2 {
       this.durationNano = durationNano;
       this.loadMetricStatsMap = Collections.unmodifiableMap(
           checkNotNull(loadMetricStatsMap, "loadMetricStatsMap"));
+      this.cpuStats = cpuStats;
+      this.memStats = memStats;
+      this.appStats = appStats;
     }
   }
 }

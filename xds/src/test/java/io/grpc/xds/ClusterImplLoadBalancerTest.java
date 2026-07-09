@@ -68,6 +68,7 @@ import io.grpc.xds.EnvoyServerProtoData.UpstreamTlsContext;
 import io.grpc.xds.WeightedTargetLoadBalancerProvider.WeightedPolicySelection;
 import io.grpc.xds.WeightedTargetLoadBalancerProvider.WeightedTargetConfig;
 import io.grpc.xds.XdsNameResolverProvider.CallCounterProvider;
+import io.grpc.xds.client.BackendMetricPropagation;
 import io.grpc.xds.client.Bootstrapper.ServerInfo;
 import io.grpc.xds.client.LoadReportClient;
 import io.grpc.xds.client.LoadStatsManager2;
@@ -1243,8 +1244,9 @@ public class ClusterImplLoadBalancerTest {
     @Override
     public ClusterLocalityStats addClusterLocalityStats(
         ServerInfo lrsServerInfo, String clusterName, @Nullable String edsServiceName,
-        Locality locality) {
-      return loadStatsManager.getClusterLocalityStats(clusterName, edsServiceName, locality);
+        Locality locality, BackendMetricPropagation backendMetricPropagation) {
+      return loadStatsManager.getClusterLocalityStats(
+          clusterName, edsServiceName, locality, backendMetricPropagation);
     }
 
     @Override
