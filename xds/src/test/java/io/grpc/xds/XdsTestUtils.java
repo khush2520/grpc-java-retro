@@ -271,7 +271,7 @@ public class XdsTestUtils {
         CLUSTER_NAME, EDS_NAME, serverInfo, null, null, null, false)
         .lbPolicyConfig(getWrrLbConfigAsMap()).build();
     XdsConfig.XdsClusterConfig clusterConfig = new XdsConfig.XdsClusterConfig(
-        CLUSTER_NAME, cdsUpdate, new EndpointConfig(StatusOr.fromValue(edsUpdate)));
+        CLUSTER_NAME, cdsUpdate, new EndpointConfig(StatusOr.fromValue(edsUpdate), "node-id"));
 
     builder
         .setListener(ldsUpdate)

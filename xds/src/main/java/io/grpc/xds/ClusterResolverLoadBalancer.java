@@ -173,6 +173,7 @@ final class ClusterResolverLoadBalancer extends LoadBalancer {
     private Object endpointLbConfig;
     private ResolvedAddresses resolvedAddresses;
     private LoadBalancer childLb;
+    @Nullable private String resolutionNote;
 
     ClusterResolverLbState(Helper helper) {
       this.helper = new RefreshableHelper(checkNotNull(helper, "helper"));
@@ -187,6 +188,7 @@ final class ClusterResolverLoadBalancer extends LoadBalancer {
       endpointLbConfig = config.lbConfig;
       DiscoveryMechanism instance = config.discoveryMechanism;
       cluster = instance.cluster;
+      resolutionNote = instance.resolutionNote;
       if (instance.type == DiscoveryMechanism.Type.EDS) {
         clusterState = new EdsClusterState(instance.cluster, instance.edsServiceName,
             instance.lrsServerInfo, instance.maxConcurrentRequests, instance.tlsContext,
@@ -258,8 +260,13 @@ final class ClusterResolverLoadBalancer extends LoadBalancer {
       if (childLb == null) {
         childLb = lbRegistry.getProvider(PRIORITY_POLICY_NAME).newLoadBalancer(helper);
       }
+      Attributes.Builder attributesBuilder = resolvedAddresses.getAttributes().toBuilder();
+      if (resolutionNote != null) {
+        attributesBuilder.set(LoadBalancer.ATTR_RESOLUTION_NOTE, resolutionNote);
+      }
       childLb.handleResolvedAddresses(
           resolvedAddresses.toBuilder()
+              .setAttributes(attributesBuilder.build())
               .setLoadBalancingPolicyConfig(childConfig)
               .setAddresses(Collections.unmodifiableList(addresses))
               .build());

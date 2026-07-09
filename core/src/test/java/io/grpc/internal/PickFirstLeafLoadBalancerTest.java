@@ -2806,6 +2806,106 @@ public class PickFirstLeafLoadBalancerTest {
     assertThat(index.getCurrentAddress()).isSameInstanceAs(addr4_4);
   }
 
+  @Test
+  public void testResolutionNoteAppendedToErrors() {
+    Attributes attrsWithNote = Attributes.newBuilder()
+        .set(LoadBalancer.ATTR_RESOLUTION_NOTE, "error-note-123")
+        .build();
+
+    // Scenario 1: validation failure on empty addresses
+    {
+      Helper helper = mock(Helper.class, delegatesTo(new MockHelperImpl(Collections.emptyList())));
+      PickFirstLeafLoadBalancer lb = new PickFirstLeafLoadBalancer(helper);
+      ResolvedAddresses emptyAddresses = ResolvedAddresses.newBuilder()
+          .setAddresses(Collections.emptyList())
+          .setAttributes(attrsWithNote)
+          .build();
+      lb.acceptResolvedAddresses(emptyAddresses);
+      verify(helper).updateBalancingState(eq(TRANSIENT_FAILURE), pickerCaptor.capture());
+      Status errorStatus = pickerCaptor.getValue().pickSubchannel(mockArgs).getStatus();
+      assertThat(errorStatus.getDescription()).contains("error-note-123");
+      lb.shutdown();
+    }
+
+    // Scenario 2: handleNameResolutionError callback
+    {
+      FakeSubchannel sc = mock(FakeSubchannel.class, delegatesTo(
+          new FakeSubchannel(servers.subList(0, 1), Attributes.EMPTY)));
+      Helper helper = mock(Helper.class, delegatesTo(new MockHelperImpl(Arrays.asList(sc))));
+      PickFirstLeafLoadBalancer lb = new PickFirstLeafLoadBalancer(helper);
+      lb.acceptResolvedAddresses(
+          ResolvedAddresses.newBuilder()
+              .setAddresses(servers.subList(0, 1))
+              .setAttributes(attrsWithNote)
+              .build());
+      lb.handleNameResolutionError(Status.UNAVAILABLE.withDescription("NR failed"));
+      verify(helper).updateBalancingState(eq(TRANSIENT_FAILURE), pickerCaptor.capture());
+      Status errorStatus = pickerCaptor.getValue().pickSubchannel(mockArgs).getStatus();
+      assertThat(errorStatus.getDescription()).contains("error-note-123");
+      assertThat(errorStatus.getDescription()).contains("NR failed");
+      lb.shutdown();
+    }
+
+    // Scenario 3: subchannel transient failure
+    {
+      FakeSubchannel sc = mock(FakeSubchannel.class, delegatesTo(
+          new FakeSubchannel(servers.subList(0, 1), Attributes.EMPTY)));
+      Helper helper = mock(Helper.class, delegatesTo(new MockHelperImpl(Arrays.asList(sc))));
+      PickFirstLeafLoadBalancer lb = new PickFirstLeafLoadBalancer(helper);
+      lb.acceptResolvedAddresses(
+          ResolvedAddresses.newBuilder()
+              .setAddresses(servers.subList(0, 1))
+              .setAttributes(attrsWithNote)
+              .build());
+      verify(sc).start(stateListenerCaptor.capture());
+      SubchannelStateListener stateListener = stateListenerCaptor.getValue();
+      stateListener.onSubchannelState(
+          ConnectivityStateInfo.forTransientFailure(
+              Status.UNAVAILABLE.withDescription("Connection failed")));
+      verify(helper).updateBalancingState(eq(TRANSIENT_FAILURE), pickerCaptor.capture());
+      Status errorStatus = pickerCaptor.getValue().pickSubchannel(mockArgs).getStatus();
+      assertThat(errorStatus.getDescription()).contains("error-note-123");
+      assertThat(errorStatus.getDescription()).contains("Connection failed");
+      lb.shutdown();
+    }
+
+    // Scenario 4: health listener transient failure (under petiole policy)
+    {
+      FakeSubchannel sc = mock(FakeSubchannel.class, delegatesTo(
+          new FakeSubchannel(servers.subList(0, 1), Attributes.EMPTY)));
+      when(sc.getAttributes()).thenReturn(
+          Attributes.newBuilder().set(HAS_HEALTH_PRODUCER_LISTENER_KEY, true).build());
+      Helper helper = mock(Helper.class, delegatesTo(new MockHelperImpl(Arrays.asList(sc))));
+      Attributes petioleAttrsWithNote = Attributes.newBuilder()
+          .set(LoadBalancer.ATTR_RESOLUTION_NOTE, "health-note-456")
+          .set(IS_PETIOLE_POLICY, true)
+          .build();
+      PickFirstLeafLoadBalancer lb = new PickFirstLeafLoadBalancer(helper);
+      lb.acceptResolvedAddresses(
+          ResolvedAddresses.newBuilder()
+              .setAddresses(servers.subList(0, 1))
+              .setAttributes(petioleAttrsWithNote)
+              .build());
+      verify(helper).createSubchannel(createArgsCaptor.capture());
+      SubchannelStateListener healthListener = createArgsCaptor.getValue()
+          .getOption(HEALTH_CONSUMER_LISTENER_ARG_KEY);
+      verify(sc).start(stateListenerCaptor.capture());
+      SubchannelStateListener stateListener = stateListenerCaptor.getValue();
+
+      // Move to READY first, so health listener state transitions can trigger updateBalancingState
+      stateListener.onSubchannelState(ConnectivityStateInfo.forNonError(READY));
+      // Trigger health failure
+      healthListener.onSubchannelState(
+          ConnectivityStateInfo.forTransientFailure(
+              Status.UNAVAILABLE.withDescription("Health check failed")));
+      verify(helper).updateBalancingState(eq(TRANSIENT_FAILURE), pickerCaptor.capture());
+      Status errorStatus = pickerCaptor.getValue().pickSubchannel(mockArgs).getStatus();
+      assertThat(errorStatus.getDescription()).contains("health-note-456");
+      assertThat(errorStatus.getDescription()).contains("Health check failed");
+      lb.shutdown();
+    }
+  }
+
   private static class FakeSocketAddress extends SocketAddress {
     final String name;
 

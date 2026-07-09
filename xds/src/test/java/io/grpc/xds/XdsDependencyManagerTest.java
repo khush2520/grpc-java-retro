@@ -68,6 +68,8 @@ import io.grpc.testing.GrpcCleanupRule;
 import io.grpc.xds.XdsClusterResource.CdsUpdate;
 import io.grpc.xds.XdsConfig.XdsClusterConfig;
 import io.grpc.xds.XdsEndpointResource.EdsUpdate;
+import io.grpc.xds.client.Bootstrapper;
+import io.grpc.xds.client.EnvoyProtoData.Node;
 import io.grpc.xds.client.Locality;
 import io.grpc.xds.client.XdsClient;
 import io.grpc.xds.client.XdsClient.ResourceMetadata;
@@ -1027,6 +1029,141 @@ public class XdsDependencyManagerTest {
       return xdsConfig.getClusters().size() == expectedNames.size()
           && xdsConfig.getClusters().keySet().containsAll(expectedNames);
     }
+  }
+
+  @Test
+  public void testResolutionNoteCombinedAndFallback() throws Exception {
+    XdsClient mockXdsClient = mock(XdsClient.class);
+    Node node = Node.newBuilder().setId("node-id-test").build();
+    Bootstrapper.BootstrapInfo bootstrapInfo = Bootstrapper.BootstrapInfo.builder()
+        .servers(Collections.singletonList(Bootstrapper.ServerInfo.create("target", new Object())))
+        .node(node)
+        .build();
+    Mockito.when(mockXdsClient.getBootstrapInfo()).thenReturn(bootstrapInfo);
+
+    // Capture the watchers
+    ArgumentCaptor<XdsClient.ResourceWatcher<XdsListenerResource.LdsUpdate>> ldsWatcherCaptor =
+        ArgumentCaptor.forClass(XdsClient.ResourceWatcher.class);
+    ArgumentCaptor<XdsClient.ResourceWatcher<XdsRouteConfigureResource.RdsUpdate>>
+        rdsWatcherCaptor = ArgumentCaptor.forClass(XdsClient.ResourceWatcher.class);
+    ArgumentCaptor<XdsClient.ResourceWatcher<XdsClusterResource.CdsUpdate>> cdsWatcherCaptor =
+        ArgumentCaptor.forClass(XdsClient.ResourceWatcher.class);
+    ArgumentCaptor<XdsClient.ResourceWatcher<XdsEndpointResource.EdsUpdate>> edsWatcherCaptor =
+        ArgumentCaptor.forClass(XdsClient.ResourceWatcher.class);
+
+    XdsDependencyManager testDepManager = new XdsDependencyManager(
+        mockXdsClient, syncContext, serverName, serverName, nameResolverArgs);
+
+    TestWatcher testWatcher = new TestWatcher();
+    testDepManager.start(testWatcher);
+
+    // Verify LDS watcher registered, capture it
+    verify(mockXdsClient).watchXdsResource(
+        ArgumentMatchers.eq(XdsListenerResource.getInstance()),
+        ArgumentMatchers.eq(serverName),
+        ldsWatcherCaptor.capture(),
+        ArgumentMatchers.eq(syncContext));
+    XdsClient.ResourceWatcher<XdsListenerResource.LdsUpdate> ldsWatcher =
+        ldsWatcherCaptor.getValue();
+
+    // 1. Initially, no config published yet because we are missing LDS data.
+    // Simulate LDS onChanged
+    Filter.NamedFilterConfig routerFilterConfig = new Filter.NamedFilterConfig(
+        "terminal-filter", RouterFilter.ROUTER_CONFIG);
+    HttpConnectionManager httpConnectionManager = HttpConnectionManager.forRdsName(
+        0L, "RDS-resource", Collections.singletonList(routerFilterConfig));
+    XdsListenerResource.LdsUpdate ldsUpdate =
+        XdsListenerResource.LdsUpdate.forApiListener(httpConnectionManager);
+    syncContext.execute(() -> ldsWatcher.onChanged(ldsUpdate));
+
+    // Verify RDS watcher registered, capture it
+    verify(mockXdsClient).watchXdsResource(
+        ArgumentMatchers.eq(XdsRouteConfigureResource.getInstance()),
+        ArgumentMatchers.eq("RDS-resource"),
+        rdsWatcherCaptor.capture(),
+        ArgumentMatchers.eq(syncContext));
+    XdsClient.ResourceWatcher<XdsRouteConfigureResource.RdsUpdate> rdsWatcher =
+        rdsWatcherCaptor.getValue();
+
+    // Simulate RDS onChanged
+    RouteConfiguration routeConfiguration =
+        XdsTestUtils.buildRouteConfiguration(serverName, "RDS-resource", "CDS-cluster");
+    XdsResourceType.Args args = new XdsResourceType.Args(null, "0", "0", null, null, null);
+    XdsRouteConfigureResource.RdsUpdate rdsUpdate =
+        XdsRouteConfigureResource.getInstance().doParse(args, routeConfiguration);
+    syncContext.execute(() -> rdsWatcher.onChanged(rdsUpdate));
+
+    // Verify CDS watcher registered, capture it
+    verify(mockXdsClient).watchXdsResource(
+        ArgumentMatchers.eq(XdsClusterResource.getInstance()),
+        ArgumentMatchers.eq("CDS-cluster"),
+        cdsWatcherCaptor.capture(),
+        ArgumentMatchers.eq(syncContext));
+    XdsClient.ResourceWatcher<XdsClusterResource.CdsUpdate> cdsWatcher =
+        cdsWatcherCaptor.getValue();
+
+    // Simulate CDS onChanged
+    XdsClusterResource.CdsUpdate cdsUpdate = XdsClusterResource.CdsUpdate.forEds(
+        "CDS-cluster", "EDS-service", null, null, null, null, false)
+        .lbPolicyConfig(ImmutableMap.of()).build();
+    syncContext.execute(() -> cdsWatcher.onChanged(cdsUpdate));
+
+    // Verify EDS watcher registered, capture it
+    verify(mockXdsClient).watchXdsResource(
+        ArgumentMatchers.eq(XdsEndpointResource.getInstance()),
+        ArgumentMatchers.eq("EDS-service"),
+        edsWatcherCaptor.capture(),
+        ArgumentMatchers.eq(syncContext));
+    XdsClient.ResourceWatcher<XdsEndpointResource.EdsUpdate> edsWatcher =
+        edsWatcherCaptor.getValue();
+
+    // Simulate EDS onChanged
+    XdsEndpointResource.EdsUpdate edsUpdate = new XdsEndpointResource.EdsUpdate(
+        "EDS-service", ImmutableMap.of(), Collections.emptyList());
+    syncContext.execute(() -> edsWatcher.onChanged(edsUpdate));
+
+    // Now, all data has been provided. A config should be published.
+    // Let's verify that the resolution note falls back to the node ID since there are no errors.
+    assertThat(testWatcher.numUpdates).isEqualTo(1);
+    XdsConfig config = testWatcher.lastConfig;
+    XdsClusterConfig.ClusterChild child =
+        config.getClusters().get("CDS-cluster").getValue().getChildren();
+    assertThat(child).isInstanceOf(XdsClusterConfig.EndpointConfig.class);
+    XdsClusterConfig.EndpointConfig endpointConfig = (XdsClusterConfig.EndpointConfig) child;
+    assertThat(endpointConfig.getResolutionNote()).isEqualTo("node-id-test");
+
+    // 2. Now trigger an ambient error on LDS watcher and EDS watcher
+    Status ldsAmbientError = Status.UNAVAILABLE.withDescription("LDS failed momentarily");
+    Status edsAmbientError = Status.UNAVAILABLE.withDescription("EDS failed momentarily");
+
+    syncContext.execute(() -> ldsWatcher.onAmbientError(ldsAmbientError));
+    syncContext.execute(() -> edsWatcher.onAmbientError(edsAmbientError));
+
+    // Verify that the configuration is republished and the resolution note combines the errors
+    assertThat(testWatcher.numUpdates).isEqualTo(3);
+    config = testWatcher.lastConfig;
+    child = config.getClusters().get("CDS-cluster").getValue().getChildren();
+    endpointConfig = (XdsClusterConfig.EndpointConfig) child;
+    String expectedNote = "LDS resource the-service-name: LDS failed momentarily, "
+        + "EDS resource EDS-service: EDS failed momentarily";
+    assertThat(endpointConfig.getResolutionNote()).isEqualTo(expectedNote);
+
+    // 3. Clear one error (e.g. EDS onChanged) and check note updates
+    syncContext.execute(() -> edsWatcher.onChanged(edsUpdate));
+    assertThat(testWatcher.numUpdates).isEqualTo(4);
+    config = testWatcher.lastConfig;
+    child = config.getClusters().get("CDS-cluster").getValue().getChildren();
+    endpointConfig = (XdsClusterConfig.EndpointConfig) child;
+    expectedNote = "LDS resource the-service-name: LDS failed momentarily";
+    assertThat(endpointConfig.getResolutionNote()).isEqualTo(expectedNote);
+
+    // 4. Clear all errors
+    syncContext.execute(() -> ldsWatcher.onChanged(ldsUpdate));
+    assertThat(testWatcher.numUpdates).isEqualTo(5);
+    config = testWatcher.lastConfig;
+    child = config.getClusters().get("CDS-cluster").getValue().getChildren();
+    endpointConfig = (XdsClusterConfig.EndpointConfig) child;
+    assertThat(endpointConfig.getResolutionNote()).isEqualTo("node-id-test");
   }
 
   private static class FakeSocketAddress extends java.net.SocketAddress {}

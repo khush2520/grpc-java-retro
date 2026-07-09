@@ -61,6 +61,7 @@ public abstract class MultiChildLoadBalancer extends LoadBalancer {
   private final Helper helper;
   // Set to true if currently in the process of handling resolved addresses.
   protected boolean resolvingAddresses;
+  @Nullable private String resolutionNote;
 
   protected final LoadBalancerProvider pickFirstLbProvider = new PickFirstLoadBalancerProvider();
 
@@ -88,10 +89,15 @@ public abstract class MultiChildLoadBalancer extends LoadBalancer {
       ResolvedAddresses resolvedAddresses) {
     Map<Object, ResolvedAddresses> childAddresses =
         Maps.newLinkedHashMapWithExpectedSize(resolvedAddresses.getAddresses().size());
+    String resNote = resolvedAddresses.getAttributes().get(ATTR_RESOLUTION_NOTE);
     for (EquivalentAddressGroup eag : resolvedAddresses.getAddresses()) {
+      Attributes.Builder attrsBuilder = Attributes.newBuilder().set(IS_PETIOLE_POLICY, true);
+      if (resNote != null) {
+        attrsBuilder.set(ATTR_RESOLUTION_NOTE, resNote);
+      }
       ResolvedAddresses addresses = resolvedAddresses.toBuilder()
           .setAddresses(Collections.singletonList(eag))
-          .setAttributes(Attributes.newBuilder().set(IS_PETIOLE_POLICY, true).build())
+          .setAttributes(attrsBuilder.build())
           .setLoadBalancingPolicyConfig(null)
           .build();
       childAddresses.put(new Endpoint(eag), addresses);
@@ -112,6 +118,7 @@ public abstract class MultiChildLoadBalancer extends LoadBalancer {
   @Override
   public Status acceptResolvedAddresses(ResolvedAddresses resolvedAddresses) {
     logger.log(Level.FINE, "Received resolution result: {0}", resolvedAddresses);
+    this.resolutionNote = resolvedAddresses.getAttributes().get(ATTR_RESOLUTION_NOTE);
     try {
       resolvingAddresses = true;
 
@@ -139,6 +146,9 @@ public abstract class MultiChildLoadBalancer extends LoadBalancer {
    */
   @Override
   public void handleNameResolutionError(Status error) {
+    if (resolutionNote != null) {
+      error = error.augmentDescription(resolutionNote);
+    }
     if (currentConnectivityState != READY)  {
       helper.updateBalancingState(
           TRANSIENT_FAILURE, new FixedResultPicker(PickResult.withError(error)));

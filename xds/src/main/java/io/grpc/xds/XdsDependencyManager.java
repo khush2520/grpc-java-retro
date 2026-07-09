@@ -219,7 +219,8 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     // Create a config and discard any watchers not accessed
     WatcherTracer tracer = new WatcherTracer(resourceWatchers);
     StatusOr<XdsConfig> config = buildUpdate(
-        tracer, listenerName, dataPlaneAuthority, subscriptions);
+        tracer, listenerName, dataPlaneAuthority, subscriptions,
+        xdsClient.getBootstrapInfo().node().getId());
     tracer.closeUnusedWatchers();
     return config;
   }
@@ -228,7 +229,8 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
       WatcherTracer tracer,
       String listenerName,
       String dataPlaneAuthority,
-      Set<ClusterSubscription> subscriptions) {
+      Set<ClusterSubscription> subscriptions,
+      String nodeId) {
     XdsConfig.XdsConfigBuilder builder = new XdsConfig.XdsConfigBuilder();
 
     // Iterate watchers and build the XdsConfig
@@ -268,10 +270,11 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     Map<String, StatusOr<XdsConfig.XdsClusterConfig>> clusters = new HashMap<>();
     LinkedHashSet<String> ancestors = new LinkedHashSet<>();
     for (String cluster : getClusterNamesFromVirtualHost(activeVirtualHost)) {
-      addConfigForCluster(clusters, cluster, ancestors, tracer);
+      addConfigForCluster(clusters, cluster, ancestors, tracer, listenerName, nodeId);
     }
     for (ClusterSubscription subscription : subscriptions) {
-      addConfigForCluster(clusters, subscription.getClusterName(), ancestors, tracer);
+      addConfigForCluster(clusters, subscription.getClusterName(), ancestors, tracer, listenerName,
+          nodeId);
     }
     for (Map.Entry<String, StatusOr<XdsConfig.XdsClusterConfig>> me : clusters.entrySet()) {
       builder.addCluster(me.getKey(), me.getValue());
@@ -297,7 +300,9 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
       String clusterName,
       @SuppressWarnings("NonApiType") // Need order-preserving set for errors
       LinkedHashSet<String> ancestors,
-      WatcherTracer tracer) {
+      WatcherTracer tracer,
+      String listenerName,
+      String nodeId) {
     if (clusters.containsKey(clusterName)) {
       return;
     }
@@ -329,7 +334,7 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
         LinkedHashSet<String> leafNames = new LinkedHashSet<String>();
         ancestors.add(clusterName);
         for (String childCluster : cdsUpdate.prioritizedClusterNames()) {
-          addConfigForCluster(clusters, childCluster, ancestors, tracer);
+          addConfigForCluster(clusters, childCluster, ancestors, tracer, listenerName, nodeId);
           StatusOr<XdsConfig.XdsClusterConfig> config = clusters.get(childCluster);
           if (!config.hasValue()) {
             // gRFC A37 says: If any of a CDS policy's watchers reports that the resource does not
@@ -358,26 +363,37 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
       case EDS:
         TrackedWatcher<XdsEndpointResource.EdsUpdate> edsWatcher =
             tracer.getWatcher(EDS_TYPE, cdsWatcher.getEdsServiceName());
+        String edsResolutionNote = computeResolutionNote(tracer, listenerName, cdsWatcher,
+            edsWatcher, nodeId);
         if (edsWatcher != null) {
-          child = new EndpointConfig(edsWatcher.getData());
+          child = new EndpointConfig(edsWatcher.getData(), edsResolutionNote);
         } else {
           child = new EndpointConfig(StatusOr.fromStatus(Status.INTERNAL.withDescription(
-              "EDS resource not found for cluster " + clusterName)));
+              "EDS resource not found for cluster " + clusterName)), edsResolutionNote);
         }
         break;
       case LOGICAL_DNS:
         if (enableLogicalDns) {
           TrackedWatcher<List<EquivalentAddressGroup>> dnsWatcher =
               tracer.getWatcher(DNS_TYPE, cdsUpdate.dnsHostName());
-          child = new EndpointConfig(dnsToEdsUpdate(dnsWatcher.getData(), cdsUpdate.dnsHostName()));
+          String dnsResolutionNote = computeResolutionNote(tracer, listenerName, cdsWatcher,
+              dnsWatcher, nodeId);
+          child = new EndpointConfig(dnsToEdsUpdate(dnsWatcher.getData(), cdsUpdate.dnsHostName()),
+              dnsResolutionNote);
         } else {
+          String dnsResolutionNote = computeResolutionNote(tracer, listenerName, cdsWatcher,
+              null, nodeId);
           child = new EndpointConfig(StatusOr.fromStatus(
-              Status.INTERNAL.withDescription("Logical DNS in dependency manager unsupported")));
+              Status.INTERNAL.withDescription("Logical DNS in dependency manager unsupported")),
+              dnsResolutionNote);
         }
         break;
       default:
+        String defaultResolutionNote = computeResolutionNote(tracer, listenerName, cdsWatcher,
+            null, nodeId);
         child = new EndpointConfig(StatusOr.fromStatus(Status.UNAVAILABLE.withDescription(
-              "Unknown type in cluster " + clusterName + " " + cdsUpdate.clusterType())));
+              "Unknown type in cluster " + clusterName + " " + cdsUpdate.clusterType())),
+              defaultResolutionNote);
     }
     if (clusters.containsKey(clusterName)) {
       // If a cycle is detected, we'll have detected it while recursing, so now there will be a key
@@ -386,6 +402,71 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     }
     clusters.put(clusterName, StatusOr.fromValue(
         new XdsConfig.XdsClusterConfig(clusterName, cdsUpdate, child)));
+  }
+
+  @Nullable
+  private static String computeResolutionNote(
+      WatcherTracer tracer,
+      String listenerName,
+      CdsWatcher cdsWatcher,
+      @Nullable TrackedWatcher<?> endpointWatcher,
+      String nodeId) {
+    List<String> errors = new ArrayList<>();
+
+    // 1. LDS
+    TrackedWatcher<XdsListenerResource.LdsUpdate> ldsWatcher =
+        tracer.getWatcher(LDS_TYPE, listenerName);
+    if (ldsWatcher != null && ldsWatcher.getAmbientError() != null) {
+      errors.add(getWatcherContextString(ldsWatcher) + ": "
+          + getStatusErrorDescription(ldsWatcher.getAmbientError()));
+    }
+
+    // 2. RDS
+    if (ldsWatcher != null && ldsWatcher.getData() != null && ldsWatcher.getData().hasValue()) {
+      XdsListenerResource.LdsUpdate ldsUpdate = ldsWatcher.getData().getValue();
+      if (ldsUpdate.httpConnectionManager() != null
+          && ldsUpdate.httpConnectionManager().rdsName() != null) {
+        String rdsName = ldsUpdate.httpConnectionManager().rdsName();
+        TrackedWatcher<RdsUpdate> rdsWatcher = tracer.getWatcher(RDS_TYPE, rdsName);
+        if (rdsWatcher != null && rdsWatcher.getAmbientError() != null) {
+          errors.add(getWatcherContextString(rdsWatcher) + ": "
+              + getStatusErrorDescription(rdsWatcher.getAmbientError()));
+        }
+      }
+    }
+
+    // 3. CDS
+    if (cdsWatcher != null && cdsWatcher.getAmbientError() != null) {
+      errors.add(cdsWatcher.toContextString() + ": "
+          + getStatusErrorDescription(cdsWatcher.getAmbientError()));
+    }
+
+    // 4. EDS or DNS
+    if (endpointWatcher != null && endpointWatcher.getAmbientError() != null) {
+      String contextStr = getWatcherContextString(endpointWatcher);
+      errors.add(contextStr + ": " + getStatusErrorDescription(endpointWatcher.getAmbientError()));
+    }
+
+    if (!errors.isEmpty()) {
+      return String.join(", ", errors);
+    }
+
+    return nodeId;
+  }
+
+  private static String getWatcherContextString(TrackedWatcher<?> watcher) {
+    if (watcher instanceof XdsWatcherBase) {
+      return ((XdsWatcherBase<?>) watcher).toContextString();
+    }
+    // DnsWatcher
+    return "DNS resource";
+  }
+
+  private static String getStatusErrorDescription(Status status) {
+    if (status.getDescription() != null) {
+      return status.getDescription();
+    }
+    return status.getCode().toString();
   }
 
   private static StatusOr<XdsEndpointResource.EdsUpdate> dnsToEdsUpdate(
@@ -608,6 +689,11 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     @Nullable
     StatusOr<T> getData();
 
+    @Nullable
+    default Status getAmbientError() {
+      return null;
+    }
+
     default boolean missingResult() {
       return getData() == null;
     }
@@ -628,7 +714,8 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
 
     @Nullable
     private StatusOr<T> data;
-
+    @Nullable
+    private Status ambientError;
 
     private XdsWatcherBase(XdsResourceType<T> type, String resourceName) {
       this.type = checkNotNull(type, "type");
@@ -641,6 +728,7 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
       if (cancelled) {
         return;
       }
+      this.ambientError = null;
       // Don't update configuration on error, if we've already received configuration
       if (!hasDataValue()) {
         this.data = StatusOr.fromStatus(Status.UNAVAILABLE.withDescription(
@@ -651,12 +739,23 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     }
 
     @Override
+    public void onAmbientError(Status error) {
+      checkNotNull(error, "error");
+      if (cancelled) {
+        return;
+      }
+      this.ambientError = error;
+      maybePublishConfig();
+    }
+
+    @Override
     public void onResourceDoesNotExist(String resourceName) {
       if (cancelled) {
         return;
       }
 
       checkArgument(this.resourceName.equals(resourceName), "Resource name does not match");
+      this.ambientError = null;
       this.data = StatusOr.fromStatus(Status.UNAVAILABLE.withDescription(
           toContextString() + " does not exist" + nodeInfo()));
       maybePublishConfig();
@@ -669,6 +768,7 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
         return;
       }
 
+      this.ambientError = null;
       this.data = StatusOr.fromValue(update);
       subscribeToChildren(update);
       maybePublishConfig();
@@ -686,6 +786,12 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     @Nullable
     public StatusOr<T> getData() {
       return data;
+    }
+
+    @Override
+    @Nullable
+    public Status getAmbientError() {
+      return ambientError;
     }
 
     public String toContextString() {
@@ -850,6 +956,8 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     private final NameResolver resolver;
     @Nullable
     private StatusOr<List<EquivalentAddressGroup>> data;
+    @Nullable
+    private Status ambientError;
     private boolean cancelled;
 
     public DnsWatcher(String dnsHostName, NameResolver.Args nameResolverArgs) {
@@ -874,6 +982,12 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
     }
 
     @Override
+    @Nullable
+    public Status getAmbientError() {
+      return ambientError;
+    }
+
+    @Override
     public void close() {
       if (cancelled) {
         return;
@@ -894,6 +1008,7 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
           return Status.OK;
         }
         data = resolutionResult.getAddressesOrError();
+        ambientError = null;
         maybePublishConfig();
         return resolutionResult.getAddressesOrError().getStatus();
       }
@@ -908,10 +1023,12 @@ final class XdsDependencyManager implements XdsConfig.XdsClusterSubscriptionRegi
             }
             // DnsNameResolver cannot distinguish between address-not-found and transient errors.
             // Assume it is a transient error.
-            // TODO: Once the resolution note API is available, don't throw away the error if
-            // hasDataValue(); pass it as the note instead
             if (!hasDataValue()) {
               data = StatusOr.fromStatus(error);
+              ambientError = null;
+              maybePublishConfig();
+            } else {
+              ambientError = error;
               maybePublishConfig();
             }
           }

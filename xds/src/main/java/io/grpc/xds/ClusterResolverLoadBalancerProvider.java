@@ -138,6 +138,8 @@ public final class ClusterResolverLoadBalancerProvider extends LoadBalancerProvi
       @Nullable
       final OutlierDetection outlierDetection;
       final Map<String, Struct> filterMetadata;
+      @Nullable
+      final String resolutionNote;
 
       enum Type {
         EDS,
@@ -147,7 +149,8 @@ public final class ClusterResolverLoadBalancerProvider extends LoadBalancerProvi
       private DiscoveryMechanism(String cluster, Type type, @Nullable String edsServiceName,
           @Nullable String dnsHostName, @Nullable ServerInfo lrsServerInfo,
           @Nullable Long maxConcurrentRequests, @Nullable UpstreamTlsContext tlsContext,
-          Map<String, Struct> filterMetadata, @Nullable OutlierDetection outlierDetection) {
+          Map<String, Struct> filterMetadata, @Nullable OutlierDetection outlierDetection,
+          @Nullable String resolutionNote) {
         this.cluster = checkNotNull(cluster, "cluster");
         this.type = checkNotNull(type, "type");
         this.edsServiceName = edsServiceName;
@@ -157,27 +160,44 @@ public final class ClusterResolverLoadBalancerProvider extends LoadBalancerProvi
         this.tlsContext = tlsContext;
         this.filterMetadata = ImmutableMap.copyOf(checkNotNull(filterMetadata, "filterMetadata"));
         this.outlierDetection = outlierDetection;
+        this.resolutionNote = resolutionNote;
       }
 
       static DiscoveryMechanism forEds(String cluster, @Nullable String edsServiceName,
           @Nullable ServerInfo lrsServerInfo, @Nullable Long maxConcurrentRequests,
           @Nullable UpstreamTlsContext tlsContext, Map<String, Struct> filterMetadata,
           OutlierDetection outlierDetection) {
+        return forEds(cluster, edsServiceName, lrsServerInfo, maxConcurrentRequests, tlsContext,
+            filterMetadata, outlierDetection, null);
+      }
+
+      static DiscoveryMechanism forEds(String cluster, @Nullable String edsServiceName,
+          @Nullable ServerInfo lrsServerInfo, @Nullable Long maxConcurrentRequests,
+          @Nullable UpstreamTlsContext tlsContext, Map<String, Struct> filterMetadata,
+          OutlierDetection outlierDetection, @Nullable String resolutionNote) {
         return new DiscoveryMechanism(cluster, Type.EDS, edsServiceName, null, lrsServerInfo,
-            maxConcurrentRequests, tlsContext, filterMetadata, outlierDetection);
+            maxConcurrentRequests, tlsContext, filterMetadata, outlierDetection, resolutionNote);
       }
 
       static DiscoveryMechanism forLogicalDns(String cluster, String dnsHostName,
           @Nullable ServerInfo lrsServerInfo, @Nullable Long maxConcurrentRequests,
           @Nullable UpstreamTlsContext tlsContext, Map<String, Struct> filterMetadata) {
+        return forLogicalDns(cluster, dnsHostName, lrsServerInfo, maxConcurrentRequests, tlsContext,
+            filterMetadata, null);
+      }
+
+      static DiscoveryMechanism forLogicalDns(String cluster, String dnsHostName,
+          @Nullable ServerInfo lrsServerInfo, @Nullable Long maxConcurrentRequests,
+          @Nullable UpstreamTlsContext tlsContext, Map<String, Struct> filterMetadata,
+          @Nullable String resolutionNote) {
         return new DiscoveryMechanism(cluster, Type.LOGICAL_DNS, null, dnsHostName,
-            lrsServerInfo, maxConcurrentRequests, tlsContext, filterMetadata, null);
+            lrsServerInfo, maxConcurrentRequests, tlsContext, filterMetadata, null, resolutionNote);
       }
 
       @Override
       public int hashCode() {
         return Objects.hash(cluster, type, lrsServerInfo, maxConcurrentRequests, tlsContext,
-            edsServiceName, dnsHostName, filterMetadata, outlierDetection);
+            edsServiceName, dnsHostName, filterMetadata, outlierDetection, resolutionNote);
       }
 
       @Override
@@ -197,7 +217,8 @@ public final class ClusterResolverLoadBalancerProvider extends LoadBalancerProvi
             && Objects.equals(maxConcurrentRequests, that.maxConcurrentRequests)
             && Objects.equals(tlsContext, that.tlsContext)
             && Objects.equals(filterMetadata, that.filterMetadata)
-            && Objects.equals(outlierDetection, that.outlierDetection);
+            && Objects.equals(outlierDetection, that.outlierDetection)
+            && Objects.equals(resolutionNote, that.resolutionNote);
       }
 
       @Override
@@ -213,6 +234,7 @@ public final class ClusterResolverLoadBalancerProvider extends LoadBalancerProvi
                 .add("maxConcurrentRequests", maxConcurrentRequests)
                 .add("filterMetadata", filterMetadata)
                 // Exclude outlierDetection as its string representation is long.
+                .add("resolutionNote", resolutionNote)
                 ;
         return toStringHelper.toString();
       }

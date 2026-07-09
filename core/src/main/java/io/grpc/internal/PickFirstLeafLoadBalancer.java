@@ -77,6 +77,7 @@ final class PickFirstLeafLoadBalancer extends LoadBalancer {
   @Nullable
   private ScheduledHandle reconnectTask = null;
   private final boolean serializingRetries = isSerializingRetries();
+  @Nullable private String resolutionNote;
 
   PickFirstLeafLoadBalancer(Helper helper) {
     this.helper = checkNotNull(helper, "helper");
@@ -91,6 +92,8 @@ final class PickFirstLeafLoadBalancer extends LoadBalancer {
     if (rawConnectivityState == SHUTDOWN) {
       return Status.FAILED_PRECONDITION.withDescription("Already shut down");
     }
+
+    this.resolutionNote = resolvedAddresses.getAttributes().get(LoadBalancer.ATTR_RESOLUTION_NOTE);
 
     // Cache whether or not this is a petiole policy, which is based off of an address attribute
     Boolean isPetiolePolicy = resolvedAddresses.getAttributes().get(IS_PETIOLE_POLICY);
@@ -233,6 +236,9 @@ final class PickFirstLeafLoadBalancer extends LoadBalancer {
     subchannels.clear();
     addressIndex.updateGroups(ImmutableList.of());
     rawConnectivityState = TRANSIENT_FAILURE;
+    if (resolutionNote != null) {
+      error = error.augmentDescription(resolutionNote);
+    }
     updateBalancingState(TRANSIENT_FAILURE, new Picker(PickResult.withError(error)));
   }
 
@@ -317,8 +323,12 @@ final class PickFirstLeafLoadBalancer extends LoadBalancer {
 
         if (isPassComplete()) {
           rawConnectivityState = TRANSIENT_FAILURE;
+          Status status = stateInfo.getStatus();
+          if (resolutionNote != null) {
+            status = status.augmentDescription(resolutionNote);
+          }
           updateBalancingState(TRANSIENT_FAILURE,
-              new Picker(PickResult.withError(stateInfo.getStatus())));
+              new Picker(PickResult.withError(status)));
 
           // Refresh Name Resolution, but only when all 3 conditions are met
           // * We are at the end of addressIndex
@@ -381,8 +391,11 @@ final class PickFirstLeafLoadBalancer extends LoadBalancer {
       updateBalancingState(READY,
           new FixedResultPicker(PickResult.withSubchannel(subchannelData.subchannel)));
     } else if (subchannelData.getHealthState() == TRANSIENT_FAILURE) {
-      updateBalancingState(TRANSIENT_FAILURE, new Picker(PickResult.withError(
-          subchannelData.healthStateInfo.getStatus())));
+      Status status = subchannelData.healthStateInfo.getStatus();
+      if (resolutionNote != null) {
+        status = status.augmentDescription(resolutionNote);
+      }
+      updateBalancingState(TRANSIENT_FAILURE, new Picker(PickResult.withError(status)));
     } else if (concludedState != TRANSIENT_FAILURE) {
       updateBalancingState(subchannelData.getHealthState(),
           new Picker(PickResult.withNoResult()));

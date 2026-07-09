@@ -30,6 +30,7 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
+import javax.annotation.Nullable;
 
 /**
  * Represents the xDS configuration tree for a specified Listener.
@@ -158,14 +159,20 @@ final class XdsConfig {
      */
     static final class EndpointConfig implements ClusterChild {
       private final StatusOr<EdsUpdate> endpoint;
+      @Nullable private final String resolutionNote;
 
       public EndpointConfig(StatusOr<EdsUpdate> endpoint) {
+        this(endpoint, null);
+      }
+
+      public EndpointConfig(StatusOr<EdsUpdate> endpoint, @Nullable String resolutionNote) {
         this.endpoint = checkNotNull(endpoint, "endpoint");
+        this.resolutionNote = resolutionNote;
       }
 
       @Override
       public int hashCode() {
-        return endpoint.hashCode();
+        return Objects.hash(endpoint, resolutionNote);
       }
 
       @Override
@@ -173,19 +180,28 @@ final class XdsConfig {
         if (!(obj instanceof EndpointConfig)) {
           return false;
         }
-        return Objects.equals(endpoint, ((EndpointConfig)obj).endpoint);
+        EndpointConfig o = (EndpointConfig) obj;
+        return Objects.equals(endpoint, o.endpoint)
+            && Objects.equals(resolutionNote, o.resolutionNote);
       }
 
       public StatusOr<EdsUpdate> getEndpoint() {
         return endpoint;
       }
 
+      @Nullable
+      public String getResolutionNote() {
+        return resolutionNote;
+      }
+
       @Override
       public String toString() {
         if (endpoint.hasValue()) {
-          return "EndpointConfig{endpoint=" + endpoint.getValue() + "}";
+          return "EndpointConfig{endpoint=" + endpoint.getValue() + ", resolutionNote="
+              + resolutionNote + "}";
         } else {
-          return "EndpointConfig{error=" + endpoint.getStatus() + "}";
+          return "EndpointConfig{error=" + endpoint.getStatus() + ", resolutionNote="
+              + resolutionNote + "}";
         }
       }
     }

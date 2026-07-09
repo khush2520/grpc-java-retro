@@ -114,6 +114,7 @@ final class CdsLoadBalancer2 extends LoadBalancer {
       }
       CdsUpdate result = clusterConfig.getClusterResource();
       DiscoveryMechanism instance;
+      String resolutionNote = ((EndpointConfig) clusterConfig.getChildren()).getResolutionNote();
       if (result.clusterType() == ClusterType.EDS) {
         instance = DiscoveryMechanism.forEds(
             clusterName,
@@ -122,7 +123,8 @@ final class CdsLoadBalancer2 extends LoadBalancer {
             result.maxConcurrentRequests(),
             result.upstreamTlsContext(),
             result.filterMetadata(),
-            result.outlierDetection());
+            result.outlierDetection(),
+            resolutionNote);
       } else {
         instance = DiscoveryMechanism.forLogicalDns(
             clusterName,
@@ -130,7 +132,8 @@ final class CdsLoadBalancer2 extends LoadBalancer {
             result.lrsServerInfo(),
             result.maxConcurrentRequests(),
             result.upstreamTlsContext(),
-            result.filterMetadata());
+            result.filterMetadata(),
+            resolutionNote);
       }
       gracefulConfig = GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(
           lbRegistry.getProvider(CLUSTER_RESOLVER_POLICY_NAME),
