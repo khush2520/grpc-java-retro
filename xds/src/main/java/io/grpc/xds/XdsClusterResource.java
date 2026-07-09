@@ -47,6 +47,7 @@ import io.grpc.internal.ServiceConfigUtil.LbConfig;
 import io.grpc.xds.EnvoyServerProtoData.OutlierDetection;
 import io.grpc.xds.EnvoyServerProtoData.UpstreamTlsContext;
 import io.grpc.xds.XdsClusterResource.CdsUpdate;
+import io.grpc.xds.client.BackendMetricPropagation;
 import io.grpc.xds.client.XdsClient.ResourceUpdate;
 import io.grpc.xds.client.XdsResourceType;
 import io.grpc.xds.internal.security.CommonTlsContextUtil;
@@ -67,6 +68,9 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
       GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_SYSTEM_ROOT_CERTS", false);
   static boolean isEnabledXdsHttpConnect =
       GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_HTTP_CONNECT", false);
+  @VisibleForTesting
+  public static boolean isEnabledOrcaLrsPropagation =
+      GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_ORCA_LRS_PROPAGATION", false);
 
   @VisibleForTesting
   static final String AGGREGATE_CLUSTER_TYPE_NAME = "envoy.clusters.aggregate";
@@ -178,6 +182,10 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
     }
 
     updateBuilder.lbPolicyConfig(lbPolicyConfig);
+    BackendMetricPropagation backendMetricPropagation = isEnabledOrcaLrsPropagation
+        ? BackendMetricPropagation.fromCds(cluster.getLrsReportEndpointMetricsList())
+        : BackendMetricPropagation.OLD_BEHAVIOR;
+    updateBuilder.backendMetricPropagation(backendMetricPropagation);
     updateBuilder.filterMetadata(
         ImmutableMap.copyOf(cluster.getMetadata().getFilterMetadataMap()));
 
@@ -564,6 +572,8 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
 
     abstract ImmutableMap<String, ?> lbPolicyConfig();
 
+    abstract BackendMetricPropagation backendMetricPropagation();
+
     // Only valid if lbPolicy is "ring_hash_experimental".
     abstract long minRingSize();
 
@@ -622,7 +632,8 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
           .choiceCount(0)
           .filterMetadata(ImmutableMap.of())
           .parsedMetadata(ImmutableMap.of())
-          .isHttp11ProxyAvailable(false);
+          .isHttp11ProxyAvailable(false)
+          .backendMetricPropagation(BackendMetricPropagation.OLD_BEHAVIOR);
     }
 
     static Builder forAggregate(String clusterName, List<String> prioritizedClusterNames) {
@@ -683,6 +694,7 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
           .add("dnsHostName", dnsHostName())
           .add("lrsServerInfo", lrsServerInfo())
           .add("maxConcurrentRequests", maxConcurrentRequests())
+          .add("backendMetricPropagation", backendMetricPropagation())
           // Exclude upstreamTlsContext and outlierDetection as their string representations are
           // cumbersome.
           .add("prioritizedClusterNames", prioritizedClusterNames())
@@ -748,6 +760,9 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
       protected abstract Builder filterMetadata(ImmutableMap<String, Struct> filterMetadata);
 
       protected abstract Builder parsedMetadata(ImmutableMap<String, Object> parsedMetadata);
+
+      protected abstract Builder backendMetricPropagation(
+          BackendMetricPropagation backendMetricPropagation);
 
       abstract CdsUpdate build();
     }
