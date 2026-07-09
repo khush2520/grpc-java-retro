@@ -182,9 +182,42 @@ public class XdsNameResolverTest {
 
     originalEnableTimeout = XdsNameResolver.enableTimeout;
     XdsNameResolver.enableTimeout = true;
+    final FaultFilter testFaultFilter = new FaultFilter(mockRandom, new AtomicLong());
     FilterRegistry filterRegistry = FilterRegistry.newRegistry().register(
-        new FaultFilter(mockRandom, new AtomicLong()),
-        RouterFilter.INSTANCE);
+        new Filter.Provider() {
+          @Override
+          public String[] typeUrls() {
+            return new String[] { FaultFilter.TYPE_URL };
+          }
+
+          @Override
+          public boolean isClientFilter() {
+            return true;
+          }
+
+          @Override
+          public boolean isServerFilter() {
+            return false;
+          }
+
+          @Override
+          public Filter newInstance() {
+            return testFaultFilter;
+          }
+
+          @Override
+          public io.grpc.xds.ConfigOrError<FaultConfig> parseFilterConfig(
+              com.google.protobuf.Message rawProtoMessage) {
+            return new FaultFilter.Provider().parseFilterConfig(rawProtoMessage);
+          }
+
+          @Override
+          public io.grpc.xds.ConfigOrError<FaultConfig> parseFilterConfigOverride(
+              com.google.protobuf.Message rawProtoMessage) {
+            return new FaultFilter.Provider().parseFilterConfigOverride(rawProtoMessage);
+          }
+        },
+        new RouterFilter.Provider());
     resolver = new XdsNameResolver(targetUri, null, AUTHORITY, null,
         serviceConfigParser, syncContext, scheduler,
         xdsClientPoolFactory, mockRandom, filterRegistry, null);

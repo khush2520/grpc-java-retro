@@ -17,27 +17,32 @@
 package io.grpc.xds;
 
 import com.google.common.annotations.VisibleForTesting;
+import io.grpc.internal.GrpcUtil;
 import java.util.HashMap;
 import java.util.Map;
 import javax.annotation.Nullable;
 
 /**
  * A registry for all supported {@link Filter}s. Filters can be queried from the registry
- * by any of the {@link Filter#typeUrls() type URLs}.
+ * by any of the {@link Filter.Provider#typeUrls() type URLs}.
  */
 final class FilterRegistry {
   private static FilterRegistry instance;
 
-  private final Map<String, Filter> supportedFilters = new HashMap<>();
+  private final Map<String, Filter.Provider> supportedFilters = new HashMap<>();
 
   private FilterRegistry() {}
 
   static synchronized FilterRegistry getDefaultRegistry() {
     if (instance == null) {
-      instance = newRegistry().register(
-              FaultFilter.INSTANCE,
-              RouterFilter.INSTANCE,
-              RbacFilter.INSTANCE);
+      FilterRegistry registry = newRegistry().register(
+              new FaultFilter.Provider(),
+              new RouterFilter.Provider(),
+              new RbacFilter.Provider());
+      if (GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_GCP_AUTHENTICATION_FILTER", false)) {
+        registry.register(new GcpAuthenticationFilter.Provider());
+      }
+      instance = registry;
     }
     return instance;
   }
@@ -48,8 +53,8 @@ final class FilterRegistry {
   }
 
   @VisibleForTesting
-  FilterRegistry register(Filter... filters) {
-    for (Filter filter : filters) {
+  FilterRegistry register(Filter.Provider... filters) {
+    for (Filter.Provider filter : filters) {
       for (String typeUrl : filter.typeUrls()) {
         supportedFilters.put(typeUrl, filter);
       }
@@ -58,7 +63,7 @@ final class FilterRegistry {
   }
 
   @Nullable
-  Filter get(String typeUrl) {
+  Filter.Provider get(String typeUrl) {
     return supportedFilters.get(typeUrl);
   }
 }

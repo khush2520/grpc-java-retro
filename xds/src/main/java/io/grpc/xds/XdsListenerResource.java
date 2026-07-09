@@ -574,9 +574,10 @@ class XdsListenerResource extends XdsResourceType<LdsUpdate> {
       return StructOrError.fromError(
           "HttpFilter [" + filterName + "] contains invalid proto: " + e);
     }
-    Filter filter = filterRegistry.get(typeUrl);
-    if ((isForClient && !(filter instanceof Filter.ClientInterceptorBuilder))
-        || (!isForClient && !(filter instanceof Filter.ServerInterceptorBuilder))) {
+    Filter.Provider provider = filterRegistry.get(typeUrl);
+    if (provider == null
+        || (isForClient && !provider.isClientFilter())
+        || (!isForClient && !provider.isServerFilter())) {
       if (isOptional) {
         return null;
       } else {
@@ -585,7 +586,7 @@ class XdsListenerResource extends XdsResourceType<LdsUpdate> {
                 + (isForClient ? "client" : "server"));
       }
     }
-    ConfigOrError<? extends FilterConfig> filterConfig = filter.parseFilterConfig(rawConfig);
+    ConfigOrError<? extends FilterConfig> filterConfig = provider.parseFilterConfig(rawConfig);
     if (filterConfig.errorDetail != null) {
       return StructOrError.fromError(
           "Invalid filter config for HttpFilter [" + filterName + "]: " + filterConfig.errorDetail);

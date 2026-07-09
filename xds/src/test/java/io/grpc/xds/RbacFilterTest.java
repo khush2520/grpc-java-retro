@@ -289,7 +289,7 @@ public class RbacFilterTest {
                     .putPolicies("policy-name",
                             Policy.newBuilder().setCondition(Expr.newBuilder().build()).build())
                     .build()).build();
-    result = new RbacFilter().parseFilterConfig(Any.pack(rawProto));
+    result = new RbacFilter.Provider().parseFilterConfig(Any.pack(rawProto));
     assertThat(result.errorDetail).isNotNull();
   }
 
@@ -312,7 +312,7 @@ public class RbacFilterTest {
 
     RBACPerRoute rbacPerRoute = RBACPerRoute.newBuilder().build();
     RbacConfig override =
-            new RbacFilter().parseFilterConfigOverride(Any.pack(rbacPerRoute)).config;
+            new RbacFilter.Provider().parseFilterConfigOverride(Any.pack(rbacPerRoute)).config;
     assertThat(override).isEqualTo(RbacConfig.create(null));
     ServerInterceptor interceptor = new RbacFilter().buildServerInterceptor(original, override);
     assertThat(interceptor).isNull();
@@ -336,22 +336,26 @@ public class RbacFilterTest {
     Message rawProto = io.envoyproxy.envoy.extensions.filters.http.rbac.v3.RBAC.newBuilder()
             .setRules(RBAC.newBuilder().setAction(Action.LOG)
                     .putPolicies("policy-name", Policy.newBuilder().build()).build()).build();
-    ConfigOrError<RbacConfig> result = new RbacFilter().parseFilterConfig(Any.pack(rawProto));
+    ConfigOrError<RbacConfig> result =
+        new RbacFilter.Provider().parseFilterConfig(Any.pack(rawProto));
     assertThat(result.config).isEqualTo(RbacConfig.create(null));
   }
 
   @Test
   public void testOrderIndependenceOfPolicies() {
     Message rawProto = buildComplexRbac(ImmutableList.of(1, 2, 3, 4, 5, 6), true);
-    ConfigOrError<RbacConfig> ascFirst = new RbacFilter().parseFilterConfig(Any.pack(rawProto));
+    ConfigOrError<RbacConfig> ascFirst =
+        new RbacFilter.Provider().parseFilterConfig(Any.pack(rawProto));
 
     rawProto = buildComplexRbac(ImmutableList.of(1, 2, 3, 4, 5, 6), false);
-    ConfigOrError<RbacConfig> ascLast = new RbacFilter().parseFilterConfig(Any.pack(rawProto));
+    ConfigOrError<RbacConfig> ascLast =
+        new RbacFilter.Provider().parseFilterConfig(Any.pack(rawProto));
 
     assertThat(ascFirst.config).isEqualTo(ascLast.config);
 
     rawProto = buildComplexRbac(ImmutableList.of(6, 5, 4, 3, 2, 1), true);
-    ConfigOrError<RbacConfig> decFirst = new RbacFilter().parseFilterConfig(Any.pack(rawProto));
+    ConfigOrError<RbacConfig> decFirst =
+        new RbacFilter.Provider().parseFilterConfig(Any.pack(rawProto));
 
     assertThat(ascFirst.config).isEqualTo(decFirst.config);
   }
@@ -380,7 +384,7 @@ public class RbacFilterTest {
                                                       List<Principal> principalList) {
     Message rawProto = buildRbac(permissionList, principalList);
     Any proto = Any.pack(rawProto);
-    return new RbacFilter().parseFilterConfig(proto);
+    return new RbacFilter.Provider().parseFilterConfig(proto);
   }
 
   private io.envoyproxy.envoy.extensions.filters.http.rbac.v3.RBAC buildRbac(
@@ -448,6 +452,6 @@ public class RbacFilterTest {
     RBACPerRoute rbacPerRoute = RBACPerRoute.newBuilder().setRbac(
             buildRbac(permissionList, principalList)).build();
     Any proto = Any.pack(rbacPerRoute);
-    return new RbacFilter().parseFilterConfigOverride(proto);
+    return new RbacFilter.Provider().parseFilterConfigOverride(proto);
   }
 }

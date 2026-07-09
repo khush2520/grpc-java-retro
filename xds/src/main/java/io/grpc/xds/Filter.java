@@ -32,27 +32,47 @@ import javax.annotation.Nullable;
  */
 interface Filter {
 
-  /**
-   * The proto message types supported by this filter. A filter will be registered by each of its
-   * supported message types.
-   */
-  String[] typeUrls();
-
-  /**
-   * Parses the top-level filter config from raw proto message. The message may be either a {@link
-   * com.google.protobuf.Any} or a {@link com.google.protobuf.Struct}.
-   */
-  ConfigOrError<? extends FilterConfig> parseFilterConfig(Message rawProtoMessage);
-
-  /**
-   * Parses the per-filter override filter config from raw proto message. The message may be either
-   * a {@link com.google.protobuf.Any} or a {@link com.google.protobuf.Struct}.
-   */
-  ConfigOrError<? extends FilterConfig> parseFilterConfigOverride(Message rawProtoMessage);
-
   /** Represents an opaque data structure holding configuration for a filter. */
   interface FilterConfig {
     String typeUrl();
+  }
+
+  /**
+   * Common interface for filter providers.
+   */
+  interface Provider {
+    /**
+     * The proto message types supported by this filter. A filter will be registered by each of its
+     * supported message types.
+     */
+    String[] typeUrls();
+
+    /**
+     * Whether the filter can be installed on the client side.
+     */
+    boolean isClientFilter();
+
+    /**
+     * Whether the filter can be installed into xDS-enabled servers.
+     */
+    boolean isServerFilter();
+
+    /**
+     * Creates a new instance of the filter.
+     */
+    Filter newInstance();
+
+    /**
+     * Parses the top-level filter config from raw proto message. The message may be either a {@link
+     * com.google.protobuf.Any} or a {@link com.google.protobuf.Struct}.
+     */
+    ConfigOrError<? extends FilterConfig> parseFilterConfig(Message rawProtoMessage);
+
+    /**
+     * Parses the per-filter override filter config from raw proto message. The message may be
+     * either a {@link com.google.protobuf.Any} or a {@link com.google.protobuf.Struct}.
+     */
+    ConfigOrError<? extends FilterConfig> parseFilterConfigOverride(Message rawProtoMessage);
   }
 
   /** Uses the FilterConfigs produced above to produce an HTTP filter interceptor for clients. */
@@ -69,6 +89,8 @@ interface Filter {
     ServerInterceptor buildServerInterceptor(
         FilterConfig config, @Nullable FilterConfig overrideConfig);
   }
+
+  default void close() {}
 
   /** Filter config with instance name. */
   final class NamedFilterConfig {

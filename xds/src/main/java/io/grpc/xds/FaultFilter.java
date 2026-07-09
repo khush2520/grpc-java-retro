@@ -88,24 +88,46 @@ final class FaultFilter implements Filter, ClientInterceptorBuilder {
     this.activeFaultCounter = activeFaultCounter;
   }
 
-  @Override
-  public String[] typeUrls() {
-    return new String[] { TYPE_URL };
-  }
+  static final class Provider implements Filter.Provider {
+    @Override
+    public String[] typeUrls() {
+      return new String[] { TYPE_URL };
+    }
 
-  @Override
-  public ConfigOrError<FaultConfig> parseFilterConfig(Message rawProtoMessage) {
-    HTTPFault httpFaultProto;
-    if (!(rawProtoMessage instanceof Any)) {
-      return ConfigOrError.fromError("Invalid config type: " + rawProtoMessage.getClass());
+    @Override
+    public boolean isClientFilter() {
+      return true;
     }
-    Any anyMessage = (Any) rawProtoMessage;
-    try {
-      httpFaultProto = anyMessage.unpack(HTTPFault.class);
-    } catch (InvalidProtocolBufferException e) {
-      return ConfigOrError.fromError("Invalid proto: " + e);
+
+    @Override
+    public boolean isServerFilter() {
+      return false;
     }
-    return parseHttpFault(httpFaultProto);
+
+    @Override
+    public Filter newInstance() {
+      return INSTANCE;
+    }
+
+    @Override
+    public ConfigOrError<FaultConfig> parseFilterConfig(Message rawProtoMessage) {
+      HTTPFault httpFaultProto;
+      if (!(rawProtoMessage instanceof Any)) {
+        return ConfigOrError.fromError("Invalid config type: " + rawProtoMessage.getClass());
+      }
+      Any anyMessage = (Any) rawProtoMessage;
+      try {
+        httpFaultProto = anyMessage.unpack(HTTPFault.class);
+      } catch (InvalidProtocolBufferException e) {
+        return ConfigOrError.fromError("Invalid proto: " + e);
+      }
+      return parseHttpFault(httpFaultProto);
+    }
+
+    @Override
+    public ConfigOrError<FaultConfig> parseFilterConfigOverride(Message rawProtoMessage) {
+      return parseFilterConfig(rawProtoMessage);
+    }
   }
 
   private static ConfigOrError<FaultConfig> parseHttpFault(HTTPFault httpFault) {
@@ -173,11 +195,6 @@ final class FaultFilter implements Filter, ClientInterceptorBuilder {
       default:
         throw new IllegalArgumentException("Unknown denominator type: " + proto.getDenominator());
     }
-  }
-
-  @Override
-  public ConfigOrError<FaultConfig> parseFilterConfigOverride(Message rawProtoMessage) {
-    return parseFilterConfig(rawProtoMessage);
   }
 
   @Nullable

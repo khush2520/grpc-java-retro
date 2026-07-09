@@ -38,11 +38,11 @@ public class FaultFilterTest {
   public void parseFaultAbort_convertHttpStatus() {
     Any rawConfig = Any.pack(
         HTTPFault.newBuilder().setAbort(FaultAbort.newBuilder().setHttpStatus(404)).build());
-    FaultConfig faultConfig = FaultFilter.INSTANCE.parseFilterConfig(rawConfig).config;
+    FaultConfig faultConfig = new FaultFilter.Provider().parseFilterConfig(rawConfig).config;
     assertThat(faultConfig.faultAbort().status().getCode())
         .isEqualTo(GrpcUtil.httpStatusToGrpcStatus(404).getCode());
     FaultConfig faultConfigOverride =
-        FaultFilter.INSTANCE.parseFilterConfigOverride(rawConfig).config;
+        new FaultFilter.Provider().parseFilterConfigOverride(rawConfig).config;
     assertThat(faultConfigOverride.faultAbort().status().getCode())
         .isEqualTo(GrpcUtil.httpStatusToGrpcStatus(404).getCode());
   }

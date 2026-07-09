@@ -958,8 +958,10 @@ public class XdsServerWrapperTest {
     when(serverCall.getAuthority()).thenReturn("not-match.google.com");
 
     Filter filter = mock(Filter.class);
-    when(filter.typeUrls()).thenReturn(new String[]{"filter-type-url"});
-    filterRegistry.register(filter);
+    Filter.Provider provider = mock(Filter.Provider.class);
+    when(provider.typeUrls()).thenReturn(new String[]{"filter-type-url"});
+    when(provider.newInstance()).thenReturn(filter);
+    filterRegistry.register(provider);
     ServerCallHandler<Void, Void> next = mock(ServerCallHandler.class);
     interceptor.interceptCall(serverCall, new Metadata(), next);
     verify(next, never()).startCall(any(ServerCall.class), any(Metadata.class));
@@ -999,8 +1001,10 @@ public class XdsServerWrapperTest {
     when(serverCall.getAuthority()).thenReturn("foo.google.com");
 
     Filter filter = mock(Filter.class);
-    when(filter.typeUrls()).thenReturn(new String[]{"filter-type-url"});
-    filterRegistry.register(filter);
+    Filter.Provider provider = mock(Filter.Provider.class);
+    when(provider.typeUrls()).thenReturn(new String[]{"filter-type-url"});
+    when(provider.newInstance()).thenReturn(filter);
+    filterRegistry.register(provider);
     ServerCallHandler<Void, Void> next = mock(ServerCallHandler.class);
     interceptor.interceptCall(serverCall, new Metadata(), next);
     verify(next, never()).startCall(any(ServerCall.class), any(Metadata.class));
@@ -1045,8 +1049,10 @@ public class XdsServerWrapperTest {
     when(serverCall.getAuthority()).thenReturn("foo.google.com");
 
     Filter filter = mock(Filter.class);
-    when(filter.typeUrls()).thenReturn(new String[]{"filter-type-url"});
-    filterRegistry.register(filter);
+    Filter.Provider provider = mock(Filter.Provider.class);
+    when(provider.typeUrls()).thenReturn(new String[]{"filter-type-url"});
+    when(provider.newInstance()).thenReturn(filter);
+    filterRegistry.register(provider);
     ServerCallHandler<Void, Void> next = mock(ServerCallHandler.class);
     interceptor.interceptCall(serverCall, new Metadata(), next);
     verify(next, never()).startCall(any(ServerCall.class), any(Metadata.class));
@@ -1115,8 +1121,10 @@ public class XdsServerWrapperTest {
             Collections.<HeaderMatcher>emptyList(), null);
     Filter filter = mock(Filter.class, withSettings()
         .extraInterfaces(ServerInterceptorBuilder.class));
-    when(filter.typeUrls()).thenReturn(new String[]{"filter-type-url"});
-    filterRegistry.register(filter);
+    Filter.Provider provider = mock(Filter.Provider.class);
+    when(provider.typeUrls()).thenReturn(new String[]{"filter-type-url"});
+    when(provider.newInstance()).thenReturn(filter);
+    filterRegistry.register(provider);
     FilterConfig f0 = mock(FilterConfig.class);
     FilterConfig f0Override = mock(FilterConfig.class);
     when(f0.typeUrl()).thenReturn("filter-type-url");
@@ -1187,8 +1195,10 @@ public class XdsServerWrapperTest {
 
     Filter filter = mock(Filter.class, withSettings()
         .extraInterfaces(ServerInterceptorBuilder.class));
-    when(filter.typeUrls()).thenReturn(new String[]{"filter-type-url"});
-    filterRegistry.register(filter);
+    Filter.Provider provider = mock(Filter.Provider.class);
+    when(provider.typeUrls()).thenReturn(new String[]{"filter-type-url"});
+    when(provider.newInstance()).thenReturn(filter);
+    filterRegistry.register(provider);
     FilterConfig f0 = mock(FilterConfig.class);
     FilterConfig f0Override = mock(FilterConfig.class);
     when(f0.typeUrl()).thenReturn("filter-type-url");

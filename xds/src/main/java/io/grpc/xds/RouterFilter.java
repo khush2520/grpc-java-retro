@@ -46,19 +46,37 @@ enum RouterFilter implements Filter, ClientInterceptorBuilder, ServerInterceptor
     }
   };
 
-  @Override
-  public String[] typeUrls() {
-    return new String[] { TYPE_URL };
-  }
+  static final class Provider implements Filter.Provider {
+    @Override
+    public String[] typeUrls() {
+      return new String[] { TYPE_URL };
+    }
 
-  @Override
-  public ConfigOrError<? extends FilterConfig> parseFilterConfig(Message rawProtoMessage) {
-    return ConfigOrError.fromConfig(ROUTER_CONFIG);
-  }
+    @Override
+    public boolean isClientFilter() {
+      return true;
+    }
 
-  @Override
-  public ConfigOrError<? extends FilterConfig> parseFilterConfigOverride(Message rawProtoMessage) {
-    return ConfigOrError.fromError("Router Filter should not have override config");
+    @Override
+    public boolean isServerFilter() {
+      return true;
+    }
+
+    @Override
+    public Filter newInstance() {
+      return INSTANCE;
+    }
+
+    @Override
+    public ConfigOrError<? extends FilterConfig> parseFilterConfig(Message rawProtoMessage) {
+      return ConfigOrError.fromConfig(ROUTER_CONFIG);
+    }
+
+    @Override
+    public ConfigOrError<? extends FilterConfig> parseFilterConfigOverride(
+        Message rawProtoMessage) {
+      return ConfigOrError.fromError("Router Filter should not have override config");
+    }
   }
 
   @Nullable

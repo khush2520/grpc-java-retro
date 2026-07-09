@@ -79,24 +79,60 @@ final class RbacFilter implements Filter, ServerInterceptorBuilder {
 
   RbacFilter() {}
 
-  @Override
-  public String[] typeUrls() {
-    return new String[] { TYPE_URL, TYPE_URL_OVERRIDE_CONFIG };
-  }
+  static final class Provider implements Filter.Provider {
+    @Override
+    public String[] typeUrls() {
+      return new String[] { TYPE_URL, TYPE_URL_OVERRIDE_CONFIG };
+    }
 
-  @Override
-  public ConfigOrError<RbacConfig> parseFilterConfig(Message rawProtoMessage) {
-    RBAC rbacProto;
-    if (!(rawProtoMessage instanceof Any)) {
-      return ConfigOrError.fromError("Invalid config type: " + rawProtoMessage.getClass());
+    @Override
+    public boolean isClientFilter() {
+      return false;
     }
-    Any anyMessage = (Any) rawProtoMessage;
-    try {
-      rbacProto = anyMessage.unpack(RBAC.class);
-    } catch (InvalidProtocolBufferException e) {
-      return ConfigOrError.fromError("Invalid proto: " + e);
+
+    @Override
+    public boolean isServerFilter() {
+      return true;
     }
-    return parseRbacConfig(rbacProto);
+
+    @Override
+    public Filter newInstance() {
+      return INSTANCE;
+    }
+
+    @Override
+    public ConfigOrError<RbacConfig> parseFilterConfig(Message rawProtoMessage) {
+      RBAC rbacProto;
+      if (!(rawProtoMessage instanceof Any)) {
+        return ConfigOrError.fromError("Invalid config type: " + rawProtoMessage.getClass());
+      }
+      Any anyMessage = (Any) rawProtoMessage;
+      try {
+        rbacProto = anyMessage.unpack(RBAC.class);
+      } catch (InvalidProtocolBufferException e) {
+        return ConfigOrError.fromError("Invalid proto: " + e);
+      }
+      return parseRbacConfig(rbacProto);
+    }
+
+    @Override
+    public ConfigOrError<RbacConfig> parseFilterConfigOverride(Message rawProtoMessage) {
+      RBACPerRoute rbacPerRoute;
+      if (!(rawProtoMessage instanceof Any)) {
+        return ConfigOrError.fromError("Invalid config type: " + rawProtoMessage.getClass());
+      }
+      Any anyMessage = (Any) rawProtoMessage;
+      try {
+        rbacPerRoute = anyMessage.unpack(RBACPerRoute.class);
+      } catch (InvalidProtocolBufferException e) {
+        return ConfigOrError.fromError("Invalid proto: " + e);
+      }
+      if (rbacPerRoute.hasRbac()) {
+        return parseRbacConfig(rbacPerRoute.getRbac());
+      } else {
+        return ConfigOrError.fromConfig(RbacConfig.create(null));
+      }
+    }
   }
 
   @VisibleForTesting
@@ -140,25 +176,6 @@ final class RbacFilter implements Filter, ServerInterceptorBuilder {
     }
     return ConfigOrError.fromConfig(RbacConfig.create(
         AuthConfig.create(policyMatchers, authAction)));
-  }
-
-  @Override
-  public ConfigOrError<RbacConfig> parseFilterConfigOverride(Message rawProtoMessage) {
-    RBACPerRoute rbacPerRoute;
-    if (!(rawProtoMessage instanceof Any)) {
-      return ConfigOrError.fromError("Invalid config type: " + rawProtoMessage.getClass());
-    }
-    Any anyMessage = (Any) rawProtoMessage;
-    try {
-      rbacPerRoute = anyMessage.unpack(RBACPerRoute.class);
-    } catch (InvalidProtocolBufferException e) {
-      return ConfigOrError.fromError("Invalid proto: " + e);
-    }
-    if (rbacPerRoute.hasRbac()) {
-      return parseRbacConfig(rbacPerRoute.getRbac());
-    } else {
-      return ConfigOrError.fromConfig(RbacConfig.create(null));
-    }
   }
 
   @Nullable
