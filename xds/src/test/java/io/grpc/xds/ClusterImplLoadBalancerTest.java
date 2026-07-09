@@ -953,6 +953,77 @@ public class ClusterImplLoadBalancerTest {
     loadBalancer = null;
   }
 
+  @Test
+  public void backendMetricPropagation() {
+    FakeLoadBalancerProvider weightedTargetProvider =
+        new FakeLoadBalancerProvider(XdsLbPolicies.WEIGHTED_TARGET_POLICY_NAME);
+    Object weightedTargetConfig = new Object();
+
+    // Create custom BackendMetricPropagation that only enables cpu
+    BackendMetricPropagation propagation = BackendMetricPropagation.create(
+        /* cpuUtilization= */ true,
+        /* memUtilization= */ false,
+        /* applicationUtilization= */ false,
+        /* namedMetricsAll= */ false,
+        /* namedMetricKeys= */ com.google.common.collect.ImmutableSet.of(),
+        /* isOldBehavior= */ false);
+
+    ClusterImplConfig config = new ClusterImplConfig(CLUSTER, EDS_SERVICE_NAME, LRS_SERVER_INFO,
+        null, Collections.<DropOverload>emptyList(),
+        GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(
+            weightedTargetProvider, weightedTargetConfig),
+        null, Collections.emptyMap(), propagation);
+
+    EquivalentAddressGroup endpoint = makeAddress("endpoint-addr", locality);
+    deliverAddressesAndConfig(Collections.singletonList(endpoint), config);
+
+    FakeLoadBalancer leafBalancer = Iterables.getOnlyElement(downstreamBalancers);
+    leafBalancer.createSubChannel();
+    FakeSubchannel fakeSubchannel = helper.subchannels.poll();
+    fakeSubchannel.updateState(ConnectivityStateInfo.forNonError(ConnectivityState.CONNECTING));
+    fakeSubchannel.setConnectedEagIndex(0);
+    fakeSubchannel.updateState(ConnectivityStateInfo.forNonError(ConnectivityState.READY));
+
+    // Now record metrics from a call.
+    PickDetailsConsumer detailsConsumer = mock(PickDetailsConsumer.class);
+    pickSubchannelArgs = new PickSubchannelArgsImpl(
+      TestMethodDescriptors.voidMethod(), new Metadata(), CallOptions.DEFAULT, detailsConsumer);
+    PickResult result = currentPicker.pickSubchannel(pickSubchannelArgs);
+    ClientStreamTracer.Factory tracerFactory = result.getStreamTracerFactory();
+    ClientStreamTracer streamTracer =
+        tracerFactory.newClientStreamTracer(
+            ClientStreamTracer.StreamInfo.newBuilder().build(), new Metadata());
+
+    Metadata trailersWithOrcaLoadReport = new Metadata();
+    trailersWithOrcaLoadReport.put(ORCA_ENDPOINT_LOAD_METRICS_KEY,
+        OrcaLoadReport.newBuilder()
+            .setCpuUtilization(0.45)
+            .setMemUtilization(0.85)
+            .setApplicationUtilization(0.95)
+            .putNamedMetrics("custom_metric", 1.23)
+            .build());
+    streamTracer.inboundTrailers(trailersWithOrcaLoadReport);
+    streamTracer.streamClosed(Status.OK);
+
+    // Retrieve stats
+    ClusterStats clusterStats =
+        Iterables.getOnlyElement(loadStatsManager.getClusterStatsReports(CLUSTER));
+    UpstreamLocalityStats localityStats =
+        Iterables.getOnlyElement(clusterStats.upstreamLocalityStatsList());
+
+    // Cpu utilization is enabled, so it should be recorded.
+    assertThat(localityStats.cpuUtilization()).isNotNull();
+    assertThat(localityStats.cpuUtilization().totalMetricValue()).isEqualTo(0.45);
+    assertThat(localityStats.cpuUtilization().numRequestsFinishedWithMetric()).isEqualTo(1L);
+
+    // Mem and App utilization are disabled, so they should be null.
+    assertThat(localityStats.memUtilization()).isNull();
+    assertThat(localityStats.applicationUtilization()).isNull();
+
+    // Named metrics are disabled, so the map should be empty.
+    assertThat(localityStats.loadMetricStatsMap()).isEmpty();
+  }
+
   private void deliverAddressesAndConfig(List<EquivalentAddressGroup> addresses,
       ClusterImplConfig config) {
     loadBalancer.acceptResolvedAddresses(

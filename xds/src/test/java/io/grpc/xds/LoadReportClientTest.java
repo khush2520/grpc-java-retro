@@ -627,6 +627,66 @@ public class LoadReportClientTest {
     assertEquals(0, fakeClock.numPendingTasks(LOAD_REPORTING_TASK_FILTER));
   }
 
+  @Test
+  public void utilizationMetricsMapping() {
+    String cluster3 = "cluster-baz.googleapis.com";
+    String edsServiceName3 = "backend-service-baz.googleapis.com";
+    Locality locality3 = Locality.create("region3", "zone3", "subZone3");
+
+    // Enable CPU, memory, and app utilization.
+    BackendMetricPropagation propagation = BackendMetricPropagation.fromCds(
+        java.util.Arrays.asList("cpu_utilization", "mem_utilization", "application_utilization"));
+
+    ClusterLocalityStats localityStats =
+        loadStatsManager.getClusterLocalityStats(
+            cluster3, edsServiceName3, locality3, propagation);
+
+    localityStats.recordCallStarted();
+    io.grpc.services.MetricReport report =
+        io.grpc.services.InternalCallMetricRecorder.createMetricReport(
+            0.12, 0.34, 0.56, 0.0, 0.0,
+            ImmutableMap.of(), ImmutableMap.of(), ImmutableMap.of()
+        );
+    localityStats.recordBackendLoadMetrics(report);
+    localityStats.recordCallFinished(Status.OK);
+
+    verify(mockLoadReportingService).streamLoadStats(lrsResponseObserverCaptor.capture());
+    StreamObserver<LoadStatsResponse> responseObserver = lrsResponseObserverCaptor.getValue();
+    StreamObserver<LoadStatsRequest> requestObserver =
+        Iterables.getOnlyElement(lrsRequestObservers);
+
+    // Ask to report loads for cluster3.
+    responseObserver.onNext(LoadStatsResponse.newBuilder().addClusters(cluster3)
+        .setLoadReportingInterval(Durations.fromSeconds(10L)).build());
+
+    fakeClock.forwardTime(10L, TimeUnit.SECONDS);
+    verify(requestObserver, times(2)).onNext(requestCaptor.capture());
+    LoadStatsRequest request = requestCaptor.getValue();
+    ClusterStats clusterStats = Iterables.getOnlyElement(request.getClusterStatsList());
+    assertThat(clusterStats.getClusterName()).isEqualTo(cluster3);
+    assertThat(clusterStats.getClusterServiceName()).isEqualTo(edsServiceName3);
+
+    UpstreamLocalityStats localityStatsProto =
+        Iterables.getOnlyElement(clusterStats.getUpstreamLocalityStatsList());
+    assertThat(localityStatsProto.getLocality().getRegion()).isEqualTo("region3");
+
+    assertThat(localityStatsProto.hasCpuUtilization()).isTrue();
+    assertThat(localityStatsProto.getCpuUtilization().getNumRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(localityStatsProto.getCpuUtilization().getTotalMetricValue()).isEqualTo(0.12);
+
+    assertThat(localityStatsProto.hasMemUtilization()).isTrue();
+    assertThat(localityStatsProto.getMemUtilization().getNumRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(localityStatsProto.getMemUtilization().getTotalMetricValue()).isEqualTo(0.56);
+
+    assertThat(localityStatsProto.hasApplicationUtilization()).isTrue();
+    assertThat(localityStatsProto.getApplicationUtilization().getNumRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(localityStatsProto.getApplicationUtilization().getTotalMetricValue())
+        .isEqualTo(0.34);
+  }
+
   private void stopLoadReportingInSyncContext() {
     syncContext.execute(new Runnable() {
       @Override
