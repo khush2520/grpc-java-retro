@@ -204,8 +204,12 @@ public class LoadReportClientTest {
     for (int i = 0; i < 23; i++) {
       dropStats2.recordDroppedRequest("throttle");
     }
+    BackendMetricPropagation propagation =
+        BackendMetricPropagation.create(
+            false, false, false, true, com.google.common.collect.ImmutableSet.<String>of());
     ClusterLocalityStats localityStats1 =
-        loadStatsManager.getClusterLocalityStats(CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1);
+        loadStatsManager.getClusterLocalityStats(
+            CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
     for (int i = 0; i < 31; i++) {
       localityStats1.recordCallStarted();
     }
@@ -213,7 +217,8 @@ public class LoadReportClientTest {
     localityStats1.recordBackendLoadMetricStats(ImmutableMap.of("named1", 1.618));
     localityStats1.recordBackendLoadMetricStats(ImmutableMap.of("named1", -2.718));
     ClusterLocalityStats localityStats2 =
-        loadStatsManager.getClusterLocalityStats(CLUSTER2, EDS_SERVICE_NAME2, LOCALITY2);
+        loadStatsManager.getClusterLocalityStats(
+            CLUSTER2, EDS_SERVICE_NAME2, LOCALITY2, propagation);
     for (int i = 0; i < 45; i++) {
       localityStats2.recordCallStarted();
     }
@@ -263,9 +268,9 @@ public class LoadReportClientTest {
     assertThat(localityStats.getLoadMetricStatsCount()).isEqualTo(1);
     EndpointLoadMetricStats loadMetricStats = Iterables.getOnlyElement(
         localityStats.getLoadMetricStatsList());
-    assertThat(loadMetricStats.getMetricName()).isEqualTo("named1");
-    assertThat(loadMetricStats.getNumRequestsFinishedWithMetric()).isEqualTo(3L);
-    assertThat(loadMetricStats.getTotalMetricValue()).isEqualTo(3.14159 + 1.618 - 2.718);
+    assertThat(loadMetricStats.getMetricName()).isEqualTo("named_metrics.named1");
+    assertThat(loadMetricStats.getNumRequestsFinishedWithMetric()).isEqualTo(2L);
+    assertThat(loadMetricStats.getTotalMetricValue()).isEqualTo(3.14159 + 1.618);
 
     fakeClock.forwardTime(10L, TimeUnit.SECONDS);
     verify(requestObserver, times(3)).onNext(requestCaptor.capture());
@@ -353,7 +358,7 @@ public class LoadReportClientTest {
     assertThat(localityStats2.getLoadMetricStatsCount()).isEqualTo(1);
     EndpointLoadMetricStats loadMetricStats2 = Iterables.getOnlyElement(
         localityStats2.getLoadMetricStatsList());
-    assertThat(loadMetricStats2.getMetricName()).isEqualTo("named2");
+    assertThat(loadMetricStats2.getMetricName()).isEqualTo("named_metrics.named2");
     assertThat(loadMetricStats2.getNumRequestsFinishedWithMetric()).isEqualTo(1L);
     assertThat(loadMetricStats2.getTotalMetricValue()).isEqualTo(1.414);
 
@@ -530,9 +535,9 @@ public class LoadReportClientTest {
     assertThat(localityStats.getLoadMetricStatsCount()).isEqualTo(1);
     EndpointLoadMetricStats loadMetricStats = Iterables.getOnlyElement(
         localityStats.getLoadMetricStatsList());
-    assertThat(loadMetricStats.getMetricName()).isEqualTo("named1");
-    assertThat(loadMetricStats.getNumRequestsFinishedWithMetric()).isEqualTo(3L);
-    assertThat(loadMetricStats.getTotalMetricValue()).isEqualTo(3.14159 + 1.618 - 2.718);
+    assertThat(loadMetricStats.getMetricName()).isEqualTo("named_metrics.named1");
+    assertThat(loadMetricStats.getNumRequestsFinishedWithMetric()).isEqualTo(2L);
+    assertThat(loadMetricStats.getTotalMetricValue()).isEqualTo(3.14159 + 1.618);
 
     // Wrapping up
     verify(backoffPolicyProvider, times(2)).get();
@@ -622,6 +627,112 @@ public class LoadReportClientTest {
     // No report sent. No new task scheduled
     verifyNoMoreInteractions(requestObserver);
     assertEquals(0, fakeClock.numPendingTasks(LOAD_REPORTING_TASK_FILTER));
+  }
+
+  @Test
+  public void utilizationMetricsReporting() {
+    verify(mockLoadReportingService).streamLoadStats(lrsResponseObserverCaptor.capture());
+    StreamObserver<LoadStatsResponse> responseObserver = lrsResponseObserverCaptor.getValue();
+    StreamObserver<LoadStatsRequest> requestObserver =
+        Iterables.getOnlyElement(lrsRequestObservers);
+    verify(requestObserver).onNext(eq(buildInitialRequest()));
+
+    BackendMetricPropagation propagation =
+        BackendMetricPropagation.create(
+            true, true, true, false, com.google.common.collect.ImmutableSet.<String>of());
+    ClusterLocalityStats localityStats =
+        loadStatsManager.getClusterLocalityStats(
+            CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
+
+    localityStats.recordCallStarted();
+    localityStats.recordTopLevelMetrics(0.5, 0.7, 0.9);
+    localityStats.recordCallFinished(Status.OK);
+
+    responseObserver.onNext(LoadStatsResponse.newBuilder().addClusters(CLUSTER1)
+        .setLoadReportingInterval(Durations.fromSeconds(10L)).build());
+
+    fakeClock.forwardTime(10L, TimeUnit.SECONDS);
+    verify(requestObserver, times(2)).onNext(requestCaptor.capture());
+    LoadStatsRequest request = requestCaptor.getValue();
+    ClusterStats clusterStats = Iterables.getOnlyElement(request.getClusterStatsList());
+
+    UpstreamLocalityStats targetLocalityStats = null;
+    for (UpstreamLocalityStats uls : clusterStats.getUpstreamLocalityStatsList()) {
+      if (uls.getLocality().getRegion().equals("region1") && uls.hasCpuUtilization()) {
+        targetLocalityStats = uls;
+        break;
+      }
+    }
+    assertThat(targetLocalityStats).isNotNull();
+    assertThat(targetLocalityStats.getCpuUtilization().getNumRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(targetLocalityStats.getCpuUtilization().getTotalMetricValue()).isEqualTo(0.5);
+    assertThat(targetLocalityStats.hasMemUtilization()).isTrue();
+    assertThat(targetLocalityStats.getMemUtilization().getNumRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(targetLocalityStats.getMemUtilization().getTotalMetricValue()).isEqualTo(0.7);
+    assertThat(targetLocalityStats.hasApplicationUtilization()).isTrue();
+    assertThat(targetLocalityStats.getApplicationUtilization().getNumRequestsFinishedWithMetric())
+        .isEqualTo(1L);
+    assertThat(targetLocalityStats.getApplicationUtilization().getTotalMetricValue())
+        .isEqualTo(0.9);
+
+    fakeClock.forwardTime(10L, TimeUnit.SECONDS);
+    verify(requestObserver, times(3)).onNext(requestCaptor.capture());
+    request = requestCaptor.getValue();
+    clusterStats = Iterables.getOnlyElement(request.getClusterStatsList());
+
+    UpstreamLocalityStats targetLocalityStats2 = null;
+    for (UpstreamLocalityStats uls : clusterStats.getUpstreamLocalityStatsList()) {
+      if (uls.getLocality().getRegion().equals("region1")
+          && uls.getTotalRequestsInProgress() == 0 // other localityStats1 from setup is in-progress
+          && uls.getTotalIssuedRequests() == 0) {
+        targetLocalityStats2 = uls;
+        break;
+      }
+    }
+    assertThat(targetLocalityStats2).isNotNull();
+    assertThat(targetLocalityStats2.hasCpuUtilization()).isFalse();
+    assertThat(targetLocalityStats2.hasMemUtilization()).isFalse();
+    assertThat(targetLocalityStats2.hasApplicationUtilization()).isFalse();
+  }
+
+  @Test
+  public void customMetricsPrefixing() {
+    verify(mockLoadReportingService).streamLoadStats(lrsResponseObserverCaptor.capture());
+    StreamObserver<LoadStatsResponse> responseObserver = lrsResponseObserverCaptor.getValue();
+    StreamObserver<LoadStatsRequest> requestObserver =
+        Iterables.getOnlyElement(lrsRequestObservers);
+    verify(requestObserver).onNext(eq(buildInitialRequest()));
+
+    BackendMetricPropagation propagation =
+        BackendMetricPropagation.create(
+            false, false, false, true, com.google.common.collect.ImmutableSet.<String>of());
+    ClusterLocalityStats localityStats =
+        loadStatsManager.getClusterLocalityStats(
+            CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
+
+    localityStats.recordBackendLoadMetricStats(ImmutableMap.of("custom_metric", 2.5));
+
+    responseObserver.onNext(LoadStatsResponse.newBuilder().addClusters(CLUSTER1)
+        .setLoadReportingInterval(Durations.fromSeconds(10L)).build());
+
+    fakeClock.forwardTime(10L, TimeUnit.SECONDS);
+    verify(requestObserver, times(2)).onNext(requestCaptor.capture());
+    LoadStatsRequest request = requestCaptor.getValue();
+    ClusterStats clusterStats = Iterables.getOnlyElement(request.getClusterStatsList());
+
+    EndpointLoadMetricStats targetMetric = null;
+    for (UpstreamLocalityStats uls : clusterStats.getUpstreamLocalityStatsList()) {
+      for (EndpointLoadMetricStats metric : uls.getLoadMetricStatsList()) {
+        if (metric.getMetricName().equals("named_metrics.custom_metric")) {
+          targetMetric = metric;
+        }
+      }
+    }
+    assertThat(targetMetric).isNotNull();
+    assertThat(targetMetric.getNumRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(targetMetric.getTotalMetricValue()).isEqualTo(2.5);
   }
 
   private void stopLoadReportingInSyncContext() {

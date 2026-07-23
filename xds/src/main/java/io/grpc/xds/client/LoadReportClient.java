@@ -335,26 +335,58 @@ public final class LoadReportClient {
         builder.setClusterServiceName(stats.clusterServiceName());
       }
       for (UpstreamLocalityStats upstreamLocalityStats : stats.upstreamLocalityStatsList()) {
-        builder.addUpstreamLocalityStats(
+        io.envoyproxy.envoy.config.endpoint.v3.UpstreamLocalityStats.Builder localityStatsBuilder =
             io.envoyproxy.envoy.config.endpoint.v3.UpstreamLocalityStats.newBuilder()
                 .setLocality(
                     io.envoyproxy.envoy.config.core.v3.Locality.newBuilder()
                         .setRegion(upstreamLocalityStats.locality().region())
                         .setZone(upstreamLocalityStats.locality().zone())
                         .setSubZone(upstreamLocalityStats.locality().subZone()))
-            .setTotalSuccessfulRequests(upstreamLocalityStats.totalSuccessfulRequests())
-            .setTotalErrorRequests(upstreamLocalityStats.totalErrorRequests())
-            .setTotalRequestsInProgress(upstreamLocalityStats.totalRequestsInProgress())
-            .setTotalIssuedRequests(upstreamLocalityStats.totalIssuedRequests())
-            .addAllLoadMetricStats(
-                upstreamLocalityStats.loadMetricStatsMap().entrySet().stream().map(
-                    e -> io.envoyproxy.envoy.config.endpoint.v3.EndpointLoadMetricStats.newBuilder()
-                        .setMetricName(e.getKey())
-                        .setNumRequestsFinishedWithMetric(
-                            e.getValue().numRequestsFinishedWithMetric())
-                        .setTotalMetricValue(e.getValue().totalMetricValue())
-                        .build())
-                .collect(Collectors.toList())));
+                .setTotalSuccessfulRequests(upstreamLocalityStats.totalSuccessfulRequests())
+                .setTotalErrorRequests(upstreamLocalityStats.totalErrorRequests())
+                .setTotalRequestsInProgress(upstreamLocalityStats.totalRequestsInProgress())
+                .setTotalIssuedRequests(upstreamLocalityStats.totalIssuedRequests())
+                .addAllLoadMetricStats(
+                    upstreamLocalityStats.loadMetricStatsMap().entrySet().stream().map(
+                        e -> io.envoyproxy.envoy.config.endpoint.v3.EndpointLoadMetricStats
+                            .newBuilder()
+                            .setMetricName(e.getKey())
+                            .setNumRequestsFinishedWithMetric(
+                                e.getValue().numRequestsFinishedWithMetric())
+                            .setTotalMetricValue(e.getValue().totalMetricValue())
+                            .build())
+                    .collect(Collectors.toList()));
+        if (upstreamLocalityStats.cpuUtilization() != null
+            && upstreamLocalityStats.cpuUtilization().numRequestsFinishedWithMetric() > 0) {
+          localityStatsBuilder.setCpuUtilization(
+              io.envoyproxy.envoy.config.endpoint.v3.UnnamedEndpointLoadMetricStats.newBuilder()
+                  .setNumRequestsFinishedWithMetric(
+                      upstreamLocalityStats.cpuUtilization().numRequestsFinishedWithMetric())
+                  .setTotalMetricValue(upstreamLocalityStats.cpuUtilization().totalMetricValue())
+                  .build());
+        }
+        if (upstreamLocalityStats.memUtilization() != null
+            && upstreamLocalityStats.memUtilization().numRequestsFinishedWithMetric() > 0) {
+          localityStatsBuilder.setMemUtilization(
+              io.envoyproxy.envoy.config.endpoint.v3.UnnamedEndpointLoadMetricStats.newBuilder()
+                  .setNumRequestsFinishedWithMetric(
+                      upstreamLocalityStats.memUtilization().numRequestsFinishedWithMetric())
+                  .setTotalMetricValue(upstreamLocalityStats.memUtilization().totalMetricValue())
+                  .build());
+        }
+        if (upstreamLocalityStats.applicationUtilization() != null
+            && upstreamLocalityStats.applicationUtilization()
+                .numRequestsFinishedWithMetric() > 0) {
+          localityStatsBuilder.setApplicationUtilization(
+              io.envoyproxy.envoy.config.endpoint.v3.UnnamedEndpointLoadMetricStats.newBuilder()
+                  .setNumRequestsFinishedWithMetric(
+                      upstreamLocalityStats.applicationUtilization()
+                          .numRequestsFinishedWithMetric())
+                  .setTotalMetricValue(
+                      upstreamLocalityStats.applicationUtilization().totalMetricValue())
+                  .build());
+        }
+        builder.addUpstreamLocalityStats(localityStatsBuilder.build());
       }
       for (DroppedRequests droppedRequests : stats.droppedRequestsList()) {
         builder.addDroppedRequests(
