@@ -388,6 +388,16 @@ public abstract class XdsClient {
   public LoadStatsManager2.ClusterLocalityStats addClusterLocalityStats(
       Bootstrapper.ServerInfo serverInfo, String clusterName, @Nullable String edsServiceName,
       Locality locality) {
+    return addClusterLocalityStats(serverInfo, clusterName, edsServiceName, locality,
+        io.grpc.xds.BackendMetricPropagation.DEACTIVATED);
+  }
+
+  /**
+   * Adds load stats for the specified locality with BackendMetricPropagation.
+   */
+  public LoadStatsManager2.ClusterLocalityStats addClusterLocalityStats(
+      Bootstrapper.ServerInfo serverInfo, String clusterName, @Nullable String edsServiceName,
+      Locality locality, io.grpc.xds.BackendMetricPropagation backendMetricPropagation) {
     throw new UnsupportedOperationException();
   }
 

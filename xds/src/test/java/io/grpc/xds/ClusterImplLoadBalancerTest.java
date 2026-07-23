@@ -27,6 +27,7 @@ import static org.mockito.Mockito.when;
 
 import com.github.xds.data.orca.v3.OrcaLoadReport;
 import com.google.common.collect.ImmutableMap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.collect.Iterables;
 import io.grpc.Attributes;
 import io.grpc.CallOptions;
@@ -61,6 +62,7 @@ import io.grpc.internal.PickSubchannelArgsImpl;
 import io.grpc.protobuf.ProtoUtils;
 import io.grpc.testing.TestMethodDescriptors;
 import io.grpc.util.GracefulSwitchLoadBalancer;
+import io.grpc.xds.BackendMetricPropagation;
 import io.grpc.xds.ClusterImplLoadBalancerProvider.ClusterImplConfig;
 import io.grpc.xds.Endpoints.DropOverload;
 import io.grpc.xds.EnvoyServerProtoData.DownstreamTlsContext;
@@ -93,6 +95,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Queue;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nonnull;
 import javax.annotation.Nullable;
 import org.junit.After;
@@ -113,6 +116,8 @@ public class ClusterImplLoadBalancerTest {
   @Rule public final MockitoRule mocks = MockitoJUnit.rule();
 
   private static final double TOLERANCE = 1.0e-10;
+  private static final BackendMetricPropagation PROPAGATE_ALL =
+      BackendMetricPropagation.create(true, true, true, true, ImmutableSet.<String>of());
   private static final String AUTHORITY = "api.google.com";
   private static final String CLUSTER = "cluster-foo.googleapis.com";
   private static final String EDS_SERVICE_NAME = "service.googleapis.com";
@@ -337,7 +342,7 @@ public class ClusterImplLoadBalancerTest {
         null, Collections.<DropOverload>emptyList(),
         GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(
             weightedTargetProvider, weightedTargetConfig),
-        null, Collections.emptyMap());
+        null, Collections.emptyMap(), PROPAGATE_ALL);
     EquivalentAddressGroup endpoint = makeAddress("endpoint-addr", locality);
     deliverAddressesAndConfig(Collections.singletonList(endpoint), config);
     FakeLoadBalancer leafBalancer = Iterables.getOnlyElement(downstreamBalancers);
@@ -380,24 +385,27 @@ public class ClusterImplLoadBalancerTest {
     assertThat(localityStats.totalSuccessfulRequests()).isEqualTo(1L);
     assertThat(localityStats.totalErrorRequests()).isEqualTo(1L);
     assertThat(localityStats.totalRequestsInProgress()).isEqualTo(1L);
-    assertThat(localityStats.loadMetricStatsMap().containsKey("named1")).isTrue();
+    assertThat(localityStats.loadMetricStatsMap().containsKey("named_metrics.named1")).isTrue();
     assertThat(
-        localityStats.loadMetricStatsMap().get("named1").numRequestsFinishedWithMetric()).isEqualTo(
-        2L);
-    assertThat(localityStats.loadMetricStatsMap().get("named1").totalMetricValue()).isWithin(
-        TOLERANCE).of(3.14159 + 2.718);
-    assertThat(localityStats.loadMetricStatsMap().containsKey("named2")).isTrue();
+        localityStats.loadMetricStatsMap().get("named_metrics.named1")
+            .numRequestsFinishedWithMetric()).isEqualTo(2L);
     assertThat(
-        localityStats.loadMetricStatsMap().get("named2").numRequestsFinishedWithMetric()).isEqualTo(
-        2L);
-    assertThat(localityStats.loadMetricStatsMap().get("named2").totalMetricValue()).isWithin(
-        TOLERANCE).of(-1.618 + 1.414);
-    assertThat(localityStats.loadMetricStatsMap().containsKey("named3")).isTrue();
+        localityStats.loadMetricStatsMap().get("named_metrics.named1").totalMetricValue())
+        .isWithin(TOLERANCE).of(3.14159 + 2.718);
+    assertThat(localityStats.loadMetricStatsMap().containsKey("named_metrics.named2")).isTrue();
     assertThat(
-        localityStats.loadMetricStatsMap().get("named3").numRequestsFinishedWithMetric()).isEqualTo(
-        1L);
-    assertThat(localityStats.loadMetricStatsMap().get("named3").totalMetricValue()).isWithin(
-        TOLERANCE).of(0.009);
+        localityStats.loadMetricStatsMap().get("named_metrics.named2")
+            .numRequestsFinishedWithMetric()).isEqualTo(1L); // -1.618 is discarded
+    assertThat(
+        localityStats.loadMetricStatsMap().get("named_metrics.named2").totalMetricValue())
+        .isWithin(TOLERANCE).of(1.414);
+    assertThat(localityStats.loadMetricStatsMap().containsKey("named_metrics.named3")).isTrue();
+    assertThat(
+        localityStats.loadMetricStatsMap().get("named_metrics.named3")
+            .numRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(
+        localityStats.loadMetricStatsMap().get("named_metrics.named3").totalMetricValue())
+        .isWithin(TOLERANCE).of(0.009);
 
     streamTracer3.streamClosed(Status.OK);
     subchannel.shutdown(); // stats recorder released
@@ -1244,7 +1252,16 @@ public class ClusterImplLoadBalancerTest {
     public ClusterLocalityStats addClusterLocalityStats(
         ServerInfo lrsServerInfo, String clusterName, @Nullable String edsServiceName,
         Locality locality) {
-      return loadStatsManager.getClusterLocalityStats(clusterName, edsServiceName, locality);
+      return addClusterLocalityStats(lrsServerInfo, clusterName, edsServiceName, locality,
+          io.grpc.xds.BackendMetricPropagation.DEACTIVATED);
+    }
+
+    @Override
+    public ClusterLocalityStats addClusterLocalityStats(
+        ServerInfo lrsServerInfo, String clusterName, @Nullable String edsServiceName,
+        Locality locality, io.grpc.xds.BackendMetricPropagation backendMetricPropagation) {
+      return loadStatsManager.getClusterLocalityStats(clusterName, edsServiceName, locality,
+          backendMetricPropagation);
     }
 
     @Override
@@ -1256,6 +1273,60 @@ public class ClusterImplLoadBalancerTest {
     public Map<ServerInfo, LoadReportClient> getServerLrsClientMap() {
       return null;
     }
+  }
+
+  @Test
+  public void swapStatsHandleOnConfigUpdate() {
+    LoadBalancerProvider weightedTargetProvider = new WeightedTargetLoadBalancerProvider();
+    WeightedTargetConfig weightedTargetConfig =
+        buildWeightedTargetConfig(ImmutableMap.of(locality, 10));
+
+    BackendMetricPropagation config1 = BackendMetricPropagation.create(
+        true, false, false, false, ImmutableSet.<String>of());
+    ClusterImplConfig lbConfig1 = new ClusterImplConfig(CLUSTER, EDS_SERVICE_NAME, LRS_SERVER_INFO,
+        null, Collections.<DropOverload>emptyList(),
+        GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(
+            weightedTargetProvider, weightedTargetConfig),
+        null, Collections.emptyMap(), config1);
+
+    EquivalentAddressGroup endpoint = makeAddress("endpoint-addr", locality);
+    deliverAddressesAndConfig(Collections.singletonList(endpoint), lbConfig1);
+
+    FakeLoadBalancer leafBalancer = Iterables.getOnlyElement(downstreamBalancers);
+    leafBalancer.createSubChannel();
+    FakeSubchannel fakeSubchannel = helper.subchannels.poll();
+    fakeSubchannel.updateState(ConnectivityStateInfo.forNonError(ConnectivityState.CONNECTING));
+    fakeSubchannel.setConnectedEagIndex(0);
+    fakeSubchannel.updateState(ConnectivityStateInfo.forNonError(ConnectivityState.READY));
+    assertThat(currentState).isEqualTo(ConnectivityState.READY);
+
+    // Get the locality atomic reference from subchannel attributes
+    AtomicReference<ClusterImplLoadBalancer.ClusterLocality> localityRef =
+        fakeSubchannel.getAttributes().get(ClusterImplLoadBalancer.ATTR_CLUSTER_LOCALITY);
+    assertThat(localityRef).isNotNull();
+    ClusterImplLoadBalancer.ClusterLocality clusterLocality1 = localityRef.get();
+    assertThat(clusterLocality1).isNotNull();
+    ClusterLocalityStats statsHandle1 = clusterLocality1.getClusterLocalityStats();
+    assertThat(statsHandle1).isNotNull();
+
+    // Now, update configuration with a new BackendMetricPropagation
+    BackendMetricPropagation config2 = BackendMetricPropagation.create(
+        false, true, false, false, ImmutableSet.<String>of());
+    ClusterImplConfig lbConfig2 = new ClusterImplConfig(CLUSTER, EDS_SERVICE_NAME, LRS_SERVER_INFO,
+        null, Collections.<DropOverload>emptyList(),
+        GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(
+            weightedTargetProvider, weightedTargetConfig),
+        null, Collections.emptyMap(), config2);
+
+    deliverAddressesAndConfig(Collections.singletonList(endpoint), lbConfig2);
+
+    // Verify stats handle has swapped atomically
+    ClusterImplLoadBalancer.ClusterLocality clusterLocality2 = localityRef.get();
+    assertThat(clusterLocality2).isNotNull();
+    assertThat(clusterLocality2).isNotSameInstanceAs(clusterLocality1);
+    ClusterLocalityStats statsHandle2 = clusterLocality2.getClusterLocalityStats();
+    assertThat(statsHandle2).isNotNull();
+    assertThat(statsHandle2).isNotSameInstanceAs(statsHandle1);
   }
 
   private static final class FakeTlsContextManager implements TlsContextManager {

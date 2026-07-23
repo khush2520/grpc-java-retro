@@ -108,13 +108,34 @@ public final class Stats {
 
     public abstract ImmutableMap<String, BackendLoadMetricStats> loadMetricStatsMap();
 
+    @Nullable
+    public abstract BackendLoadMetricStats cpuUtilization();
+
+    @Nullable
+    public abstract BackendLoadMetricStats memUtilization();
+
+    @Nullable
+    public abstract BackendLoadMetricStats applicationUtilization();
+
     public static UpstreamLocalityStats create(Locality locality, long totalIssuedRequests,
-                                        long totalSuccessfulRequests, long totalErrorRequests,
-                                        long totalRequestsInProgress,
-                                        Map<String, BackendLoadMetricStats> loadMetricStatsMap) {
+                                         long totalSuccessfulRequests, long totalErrorRequests,
+                                         long totalRequestsInProgress,
+                                         Map<String, BackendLoadMetricStats> loadMetricStatsMap) {
+      return create(locality, totalIssuedRequests, totalSuccessfulRequests, totalErrorRequests,
+          totalRequestsInProgress, loadMetricStatsMap, null, null, null);
+    }
+
+    public static UpstreamLocalityStats create(Locality locality, long totalIssuedRequests,
+                                         long totalSuccessfulRequests, long totalErrorRequests,
+                                         long totalRequestsInProgress,
+                                         Map<String, BackendLoadMetricStats> loadMetricStatsMap,
+                                         @Nullable BackendLoadMetricStats cpuUtilization,
+                                         @Nullable BackendLoadMetricStats memUtilization,
+                                         @Nullable BackendLoadMetricStats applicationUtilization) {
       return new AutoValue_Stats_UpstreamLocalityStats(locality, totalIssuedRequests,
           totalSuccessfulRequests, totalErrorRequests, totalRequestsInProgress,
-          ImmutableMap.copyOf(loadMetricStatsMap));
+          ImmutableMap.copyOf(loadMetricStatsMap), cpuUtilization, memUtilization,
+          applicationUtilization);
     }
   }
 

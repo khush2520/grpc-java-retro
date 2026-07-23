@@ -64,6 +64,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Objects;
+import java.util.Set;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 import javax.annotation.Nullable;
@@ -84,7 +85,8 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
       Strings.isNullOrEmpty(System.getenv("GRPC_XDS_EXPERIMENTAL_CIRCUIT_BREAKING"))
           || Boolean.parseBoolean(System.getenv("GRPC_XDS_EXPERIMENTAL_CIRCUIT_BREAKING"));
 
-  private static final Attributes.Key<AtomicReference<ClusterLocality>> ATTR_CLUSTER_LOCALITY =
+  @VisibleForTesting
+  static final Attributes.Key<AtomicReference<ClusterLocality>> ATTR_CLUSTER_LOCALITY =
       Attributes.Key.create("io.grpc.xds.ClusterImplLoadBalancer.clusterLocality");
 
   private final XdsLogger logger;
@@ -133,8 +135,6 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
       return Status.INTERNAL.withDescription("No cluster configuration found");
     }
 
-    this.backendMetricPropagation = config.backendMetricPropagation;
-
     if (cluster == null) {
       cluster = config.cluster;
       edsServiceName = config.edsServiceName;
@@ -152,6 +152,7 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
     childLbHelper.updateMaxConcurrentRequests(config.maxConcurrentRequests);
     childLbHelper.updateSslContextProviderSupplier(config.tlsContext);
     childLbHelper.updateFilterMetadata(config.filterMetadata);
+    childLbHelper.updateBackendMetricPropagation(config.backendMetricPropagation);
 
     childSwitchLb.handleResolvedAddresses(
         resolvedAddresses.toBuilder()
@@ -188,7 +189,7 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
     if (childSwitchLb != null) {
       childSwitchLb.shutdown();
       if (childLbHelper != null) {
-        childLbHelper.updateSslContextProviderSupplier(null);
+        childLbHelper.shutdown();
         childLbHelper = null;
       }
     }
@@ -212,10 +213,27 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
     private Map<String, Struct> filterMetadata = ImmutableMap.of();
     @Nullable
     private final ServerInfo lrsServerInfo;
+    private final Set<ClusterImplSubchannel> activeSubchannels =
+        java.util.concurrent.ConcurrentHashMap.newKeySet();
 
     private ClusterImplLbHelper(AtomicLong inFlights, @Nullable ServerInfo lrsServerInfo) {
       this.inFlights = checkNotNull(inFlights, "inFlights");
       this.lrsServerInfo = lrsServerInfo;
+    }
+
+    private void shutdown() {
+      activeSubchannels.clear();
+      updateSslContextProviderSupplier(null);
+    }
+
+    private void updateBackendMetricPropagation(BackendMetricPropagation config) {
+      if (Objects.equals(ClusterImplLoadBalancer.this.backendMetricPropagation, config)) {
+        return;
+      }
+      ClusterImplLoadBalancer.this.backendMetricPropagation = config;
+      for (ClusterImplSubchannel subchannel : activeSubchannels) {
+        subchannel.updateLocalityStats();
+      }
     }
 
     @Override
@@ -253,42 +271,10 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
       args = args.toBuilder().setAddresses(addresses).setAttributes(attrsBuilder.build()).build();
       final Subchannel subchannel = delegate().createSubchannel(args);
 
-      return new ForwardingSubchannel() {
-        @Override
-        public void start(SubchannelStateListener listener) {
-          delegate().start(new SubchannelStateListener() {
-            @Override
-            public void onSubchannelState(ConnectivityStateInfo newState) {
-              // Do nothing if LB has been shutdown
-              if (xdsClient != null && newState.getState().equals(ConnectivityState.READY)) {
-                // Get locality based on the connected address attributes
-                ClusterLocality updatedClusterLocality = createClusterLocalityFromAttributes(
-                    subchannel.getConnectedAddressAttributes());
-                ClusterLocality oldClusterLocality = localityAtomicReference
-                    .getAndSet(updatedClusterLocality);
-                oldClusterLocality.release();
-              }
-              listener.onSubchannelState(newState);
-            }
-          });
-        }
-
-        @Override
-        public void shutdown() {
-          localityAtomicReference.get().release();
-          delegate().shutdown();
-        }
-
-        @Override
-        public void updateAddresses(List<EquivalentAddressGroup> addresses) {
-          delegate().updateAddresses(withAdditionalAttributes(addresses));
-        }
-
-        @Override
-        protected Subchannel delegate() {
-          return subchannel;
-        }
-      };
+      ClusterImplSubchannel wrapped = new ClusterImplSubchannel(
+          subchannel, localityAtomicReference, args.getAddresses().get(0).getAttributes());
+      activeSubchannels.add(wrapped);
+      return wrapped;
     }
 
     private List<EquivalentAddressGroup> withAdditionalAttributes(
@@ -324,7 +310,7 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
           (lrsServerInfo == null)
               ? null
               : xdsClient.addClusterLocalityStats(lrsServerInfo, cluster,
-                  edsServiceName, locality);
+                  edsServiceName, locality, backendMetricPropagation);
 
       return new ClusterLocality(localityStats, localityName);
     }
@@ -332,6 +318,77 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
     @Override
     protected Helper delegate()  {
       return helper;
+    }
+
+    private final class ClusterImplSubchannel extends ForwardingSubchannel {
+      private final Subchannel delegate;
+      private final AtomicReference<ClusterLocality> localityAtomicReference;
+      private final Attributes addressAttributes;
+
+      private ClusterImplSubchannel(
+          Subchannel delegate,
+          AtomicReference<ClusterLocality> localityAtomicReference,
+          Attributes addressAttributes) {
+        this.delegate = checkNotNull(delegate, "delegate");
+        this.localityAtomicReference =
+            checkNotNull(localityAtomicReference, "localityAtomicReference");
+        this.addressAttributes = checkNotNull(addressAttributes, "addressAttributes");
+      }
+
+      @Override
+      public void start(SubchannelStateListener listener) {
+        delegate.start(new SubchannelStateListener() {
+          @Override
+          public void onSubchannelState(ConnectivityStateInfo newState) {
+            // Do nothing if LB has been shutdown
+            if (xdsClient != null && newState.getState().equals(ConnectivityState.READY)) {
+              // Get locality based on the connected address attributes
+              ClusterLocality updatedClusterLocality = createClusterLocalityFromAttributes(
+                  delegate.getConnectedAddressAttributes());
+              ClusterLocality oldClusterLocality = localityAtomicReference
+                  .getAndSet(updatedClusterLocality);
+              if (oldClusterLocality != null) {
+                oldClusterLocality.release();
+              }
+            }
+            listener.onSubchannelState(newState);
+          }
+        });
+      }
+
+      @Override
+      public void shutdown() {
+        activeSubchannels.remove(this);
+        ClusterLocality clusterLocality = localityAtomicReference.getAndSet(null);
+        if (clusterLocality != null) {
+          clusterLocality.release();
+        }
+        delegate.shutdown();
+      }
+
+      @Override
+      public void updateAddresses(List<EquivalentAddressGroup> addresses) {
+        delegate.updateAddresses(withAdditionalAttributes(addresses));
+      }
+
+      @Override
+      protected Subchannel delegate() {
+        return delegate;
+      }
+
+      void updateLocalityStats() {
+        Attributes attributesToUse = delegate.getConnectedAddressAttributes();
+        if (attributesToUse == null) {
+          attributesToUse = addressAttributes;
+        }
+        ClusterLocality updatedClusterLocality =
+            createClusterLocalityFromAttributes(attributesToUse);
+        ClusterLocality oldClusterLocality =
+            localityAtomicReference.getAndSet(updatedClusterLocality);
+        if (oldClusterLocality != null) {
+          oldClusterLocality.release();
+        }
+      }
     }
 
     private void updateDropPolicies(List<DropOverload> dropOverloads) {
@@ -514,6 +571,10 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
      */
     @Override
     public void onLoadReport(MetricReport report) {
+      stats.recordTopLevelMetrics(
+          report.getCpuUtilization(),
+          report.getMemoryUtilization(),
+          report.getApplicationUtilization());
       stats.recordBackendLoadMetricStats(report.getNamedMetrics());
     }
   }
