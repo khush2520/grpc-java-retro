@@ -42,6 +42,7 @@ import com.google.protobuf.InvalidProtocolBufferException;
 import com.google.protobuf.Message;
 import com.google.protobuf.UInt32Value;
 import com.google.protobuf.util.Durations;
+import io.envoyproxy.envoy.config.cluster.v3.Cluster;
 import io.envoyproxy.envoy.config.cluster.v3.OutlierDetection;
 import io.envoyproxy.envoy.config.route.v3.FilterConfig;
 import io.envoyproxy.envoy.config.route.v3.WeightedCluster;
@@ -2453,6 +2454,99 @@ public abstract class GrpcXdsClientImplTestBase {
 
     verifyResourceMetadataAcked(CDS, CDS_RESOURCE, clusterEds, VERSION_1, TIME_INCREMENT);
     verifySubscribedResourcesMetadataSizes(0, 1, 0, 0);
+  }
+
+  @Test
+  public void cdsResponseWithLrsReportEndpointMetrics_enabled() {
+    DiscoveryRpcCall call = startResourceWatcher(XdsClusterResource.getInstance(), CDS_RESOURCE,
+        cdsResourceWatcher);
+
+    Message baseClusterMsg = mf.buildEdsCluster(
+        CDS_RESOURCE, "eds-cluster-foo.googleapis.com", "round_robin",
+        null, null, true, null, "envoy.transport_sockets.tls", null, null);
+    Cluster cluster = ((Cluster) baseClusterMsg).toBuilder()
+        .addAllLrsReportEndpointMetrics(ImmutableList.of(
+            "cpu_utilization", "mem_utilization", "application_utilization",
+            "named_metrics.*", "named_metrics.foo"))
+        .build();
+
+    Any clusterEds = Any.pack(cluster);
+    call.sendResponse(CDS, ImmutableList.of(clusterEds), VERSION_1, "0000");
+
+    call.verifyRequest(CDS, CDS_RESOURCE, VERSION_1, "0000", NODE);
+    verify(cdsResourceWatcher, times(1)).onChanged(cdsUpdateCaptor.capture());
+    CdsUpdate cdsUpdate = cdsUpdateCaptor.getValue();
+
+    BackendMetricPropagation backendMetricPropagation = cdsUpdate.backendMetricPropagation();
+    assertThat(backendMetricPropagation).isNotNull();
+    assertThat(backendMetricPropagation).isNotEqualTo(BackendMetricPropagation.DEACTIVATED);
+    assertThat(backendMetricPropagation.cpuUtilization()).isTrue();
+    assertThat(backendMetricPropagation.memUtilization()).isTrue();
+    assertThat(backendMetricPropagation.applicationUtilization()).isTrue();
+    assertThat(backendMetricPropagation.namedMetricsAll()).isTrue();
+    assertThat(backendMetricPropagation.namedMetrics()).containsExactly("foo");
+
+    verifyResourceMetadataAcked(CDS, CDS_RESOURCE, clusterEds, VERSION_1, TIME_INCREMENT);
+    verifySubscribedResourcesMetadataSizes(0, 1, 0, 0);
+  }
+
+  @Test
+  public void cdsResponseWithLrsReportEndpointMetrics_disabled() {
+    boolean originalValue = XdsClusterResource.enableOrcaLrsPropagation;
+    XdsClusterResource.enableOrcaLrsPropagation = false;
+    try {
+      DiscoveryRpcCall call = startResourceWatcher(XdsClusterResource.getInstance(), CDS_RESOURCE,
+          cdsResourceWatcher);
+
+      Message baseClusterMsg = mf.buildEdsCluster(
+          CDS_RESOURCE, "eds-cluster-foo.googleapis.com", "round_robin",
+          null, null, true, null, "envoy.transport_sockets.tls", null, null);
+      Cluster cluster = ((Cluster) baseClusterMsg).toBuilder()
+          .addAllLrsReportEndpointMetrics(ImmutableList.of(
+              "cpu_utilization", "mem_utilization", "application_utilization",
+              "named_metrics.*", "named_metrics.foo"))
+          .build();
+
+      Any clusterEds = Any.pack(cluster);
+      call.sendResponse(CDS, ImmutableList.of(clusterEds), VERSION_1, "0000");
+
+      call.verifyRequest(CDS, CDS_RESOURCE, VERSION_1, "0000", NODE);
+      verify(cdsResourceWatcher, times(1)).onChanged(cdsUpdateCaptor.capture());
+      CdsUpdate cdsUpdate = cdsUpdateCaptor.getValue();
+
+      BackendMetricPropagation backendMetricPropagation = cdsUpdate.backendMetricPropagation();
+      assertThat(backendMetricPropagation).isEqualTo(BackendMetricPropagation.DEACTIVATED);
+    } finally {
+      XdsClusterResource.enableOrcaLrsPropagation = originalValue;
+    }
+  }
+
+  @Test
+  public void cdsResponseWithLrsReportEndpointMetrics_invalidMetrics() {
+    DiscoveryRpcCall call = startResourceWatcher(XdsClusterResource.getInstance(), CDS_RESOURCE,
+        cdsResourceWatcher);
+
+    Message baseClusterMsg = mf.buildEdsCluster(
+        CDS_RESOURCE, "eds-cluster-foo.googleapis.com", "round_robin",
+        null, null, true, null, "envoy.transport_sockets.tls", null, null);
+    Cluster cluster = ((Cluster) baseClusterMsg).toBuilder()
+        .addAllLrsReportEndpointMetrics(ImmutableList.of(
+            "cpu_utilization", "invalid_metric", "named_metrics.bar", "named_metrics."))
+        .build();
+
+    Any clusterEds = Any.pack(cluster);
+    call.sendResponse(CDS, ImmutableList.of(clusterEds), VERSION_1, "0000");
+
+    call.verifyRequest(CDS, CDS_RESOURCE, VERSION_1, "0000", NODE);
+    verify(cdsResourceWatcher, times(1)).onChanged(cdsUpdateCaptor.capture());
+    CdsUpdate cdsUpdate = cdsUpdateCaptor.getValue();
+
+    BackendMetricPropagation backendMetricPropagation = cdsUpdate.backendMetricPropagation();
+    assertThat(backendMetricPropagation).isNotNull();
+    assertThat(backendMetricPropagation.cpuUtilization()).isTrue();
+    assertThat(backendMetricPropagation.memUtilization()).isFalse();
+    assertThat(backendMetricPropagation.namedMetricsAll()).isFalse();
+    assertThat(backendMetricPropagation.namedMetrics()).containsExactly("bar");
   }
 
   /**

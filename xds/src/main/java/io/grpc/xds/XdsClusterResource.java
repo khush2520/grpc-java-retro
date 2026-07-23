@@ -67,6 +67,9 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
       GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_SYSTEM_ROOT_CERTS", false);
   static boolean isEnabledXdsHttpConnect =
       GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_HTTP_CONNECT", false);
+  @VisibleForTesting
+  static boolean enableOrcaLrsPropagation =
+      GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_ORCA_LRS_PROPAGATION", true);
 
   @VisibleForTesting
   static final String AGGREGATE_CLUSTER_TYPE_NAME = "envoy.clusters.aggregate";
@@ -303,6 +306,12 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
       }
     }
 
+    BackendMetricPropagation backendMetricPropagation = BackendMetricPropagation.DEACTIVATED;
+    if (enableOrcaLrsPropagation) {
+      backendMetricPropagation = BackendMetricPropagation.parse(
+          cluster.getLrsReportEndpointMetricsList());
+    }
+
     Cluster.DiscoveryType type = cluster.getType();
     if (type == Cluster.DiscoveryType.EDS) {
       String edsServiceName = null;
@@ -326,7 +335,8 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
 
       return StructOrError.fromStruct(CdsUpdate.forEds(
           clusterName, edsServiceName, lrsServerInfo, maxConcurrentRequests, upstreamTlsContext,
-          outlierDetection, isHttp11ProxyAvailable));
+          outlierDetection, isHttp11ProxyAvailable)
+          .backendMetricPropagation(backendMetricPropagation));
     } else if (type.equals(Cluster.DiscoveryType.LOGICAL_DNS)) {
       if (!cluster.hasLoadAssignment()) {
         return StructOrError.fromError(
@@ -362,7 +372,8 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
           Locale.US, "%s:%d", socketAddress.getAddress(), socketAddress.getPortValue());
       return StructOrError.fromStruct(CdsUpdate.forLogicalDns(
           clusterName, dnsHostName, lrsServerInfo, maxConcurrentRequests,
-          upstreamTlsContext, isHttp11ProxyAvailable));
+          upstreamTlsContext, isHttp11ProxyAvailable)
+          .backendMetricPropagation(backendMetricPropagation));
     }
     return StructOrError.fromError(
         "Cluster " + clusterName + ": unsupported built-in discovery type: " + type);
@@ -601,6 +612,8 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
 
     abstract boolean isHttp11ProxyAvailable();
 
+    abstract BackendMetricPropagation backendMetricPropagation();
+
     // List of underlying clusters making of this aggregate cluster.
     // Only valid for AGGREGATE cluster.
     @Nullable
@@ -622,7 +635,8 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
           .choiceCount(0)
           .filterMetadata(ImmutableMap.of())
           .parsedMetadata(ImmutableMap.of())
-          .isHttp11ProxyAvailable(false);
+          .isHttp11ProxyAvailable(false)
+          .backendMetricPropagation(BackendMetricPropagation.DEACTIVATED);
     }
 
     static Builder forAggregate(String clusterName, List<String> prioritizedClusterNames) {
@@ -736,6 +750,9 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
       protected abstract Builder maxConcurrentRequests(Long maxConcurrentRequests);
 
       protected abstract Builder isHttp11ProxyAvailable(boolean isHttp11ProxyAvailable);
+
+      protected abstract Builder backendMetricPropagation(
+          BackendMetricPropagation backendMetricPropagation);
 
       // Private, use one of the static factory methods instead.
       protected abstract Builder upstreamTlsContext(UpstreamTlsContext upstreamTlsContext);

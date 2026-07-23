@@ -100,6 +100,7 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
   private ClusterDropStats dropStats;
   private ClusterImplLbHelper childLbHelper;
   private GracefulSwitchLoadBalancer childSwitchLb;
+  private BackendMetricPropagation backendMetricPropagation;
 
   ClusterImplLoadBalancer(Helper helper) {
     this(helper, ThreadSafeRandomImpl.instance);
@@ -131,6 +132,8 @@ final class ClusterImplLoadBalancer extends LoadBalancer {
     if (config == null) {
       return Status.INTERNAL.withDescription("No cluster configuration found");
     }
+
+    this.backendMetricPropagation = config.backendMetricPropagation;
 
     if (cluster == null) {
       cluster = config.cluster;

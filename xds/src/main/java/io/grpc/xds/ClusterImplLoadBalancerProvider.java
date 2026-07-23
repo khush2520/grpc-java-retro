@@ -98,11 +98,21 @@ public final class ClusterImplLoadBalancerProvider extends LoadBalancerProvider 
     // Provides the direct child policy and its config.
     final Object childConfig;
     final Map<String, Struct> filterMetadata;
+    final BackendMetricPropagation backendMetricPropagation;
 
     ClusterImplConfig(String cluster, @Nullable String edsServiceName,
         @Nullable ServerInfo lrsServerInfo, @Nullable Long maxConcurrentRequests,
         List<DropOverload> dropCategories, Object childConfig,
         @Nullable UpstreamTlsContext tlsContext, Map<String, Struct> filterMetadata) {
+      this(cluster, edsServiceName, lrsServerInfo, maxConcurrentRequests, dropCategories,
+          childConfig, tlsContext, filterMetadata, BackendMetricPropagation.DEACTIVATED);
+    }
+
+    ClusterImplConfig(String cluster, @Nullable String edsServiceName,
+        @Nullable ServerInfo lrsServerInfo, @Nullable Long maxConcurrentRequests,
+        List<DropOverload> dropCategories, Object childConfig,
+        @Nullable UpstreamTlsContext tlsContext, Map<String, Struct> filterMetadata,
+        BackendMetricPropagation backendMetricPropagation) {
       this.cluster = checkNotNull(cluster, "cluster");
       this.edsServiceName = edsServiceName;
       this.lrsServerInfo = lrsServerInfo;
@@ -112,6 +122,8 @@ public final class ClusterImplLoadBalancerProvider extends LoadBalancerProvider 
       this.dropCategories = Collections.unmodifiableList(
           new ArrayList<>(checkNotNull(dropCategories, "dropCategories")));
       this.childConfig = checkNotNull(childConfig, "childConfig");
+      this.backendMetricPropagation =
+          checkNotNull(backendMetricPropagation, "backendMetricPropagation");
     }
 
     @Override
@@ -124,6 +136,7 @@ public final class ClusterImplLoadBalancerProvider extends LoadBalancerProvider 
           // Exclude tlsContext as its string representation is cumbersome.
           .add("dropCategories", dropCategories)
           .add("childConfig", childConfig)
+          .add("backendMetricPropagation", backendMetricPropagation)
           .toString();
     }
   }
