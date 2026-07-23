@@ -206,7 +206,7 @@ public class LoadReportClientTest {
     }
     BackendMetricPropagation propagation =
         BackendMetricPropagation.create(
-            false, false, false, true, com.google.common.collect.ImmutableSet.<String>of());
+            false, false, false, true, com.google.common.collect.ImmutableSet.<String>of(), true);
     ClusterLocalityStats localityStats1 =
         loadStatsManager.getClusterLocalityStats(
             CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
@@ -639,7 +639,7 @@ public class LoadReportClientTest {
 
     BackendMetricPropagation propagation =
         BackendMetricPropagation.create(
-            true, true, true, false, com.google.common.collect.ImmutableSet.<String>of());
+            true, true, true, false, com.google.common.collect.ImmutableSet.<String>of(), true);
     ClusterLocalityStats localityStats =
         loadStatsManager.getClusterLocalityStats(
             CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1, propagation);
@@ -707,7 +707,7 @@ public class LoadReportClientTest {
 
     BackendMetricPropagation propagation =
         BackendMetricPropagation.create(
-            false, false, false, true, com.google.common.collect.ImmutableSet.<String>of());
+            false, false, false, true, com.google.common.collect.ImmutableSet.<String>of(), true);
     ClusterLocalityStats localityStats =
         loadStatsManager.getClusterLocalityStats(
             CLUSTER1, EDS_SERVICE_NAME1, LOCALITY1, propagation);

@@ -41,21 +41,50 @@ public abstract class BackendMetricPropagation {
 
   public abstract ImmutableSet<String> namedMetrics();
 
+  public abstract boolean usePrefix();
+
+  public static final BackendMetricPropagation LEGACY =
+      create(false, false, false, true, ImmutableSet.<String>of(), false);
+
   public static final BackendMetricPropagation DEACTIVATED =
-      create(false, false, false, false, ImmutableSet.<String>of());
+      create(false, false, false, false, ImmutableSet.<String>of(), true);
 
   public static BackendMetricPropagation create(
       boolean cpuUtilization,
       boolean memUtilization,
       boolean applicationUtilization,
       boolean namedMetricsAll,
-      ImmutableSet<String> namedMetrics) {
-    return new AutoValue_BackendMetricPropagation(
-        cpuUtilization,
-        memUtilization,
-        applicationUtilization,
-        namedMetricsAll,
-        namedMetrics);
+      ImmutableSet<String> namedMetrics,
+      boolean usePrefix) {
+    return builder()
+        .cpuUtilization(cpuUtilization)
+        .memUtilization(memUtilization)
+        .applicationUtilization(applicationUtilization)
+        .namedMetricsAll(namedMetricsAll)
+        .namedMetrics(namedMetrics)
+        .usePrefix(usePrefix)
+        .build();
+  }
+
+  public static Builder builder() {
+    return new AutoValue_BackendMetricPropagation.Builder();
+  }
+
+  @AutoValue.Builder
+  public abstract static class Builder {
+    public abstract Builder cpuUtilization(boolean cpuUtilization);
+
+    public abstract Builder memUtilization(boolean memUtilization);
+
+    public abstract Builder applicationUtilization(boolean applicationUtilization);
+
+    public abstract Builder namedMetricsAll(boolean namedMetricsAll);
+
+    public abstract Builder namedMetrics(ImmutableSet<String> namedMetrics);
+
+    public abstract Builder usePrefix(boolean usePrefix);
+
+    public abstract BackendMetricPropagation build();
   }
 
   /**
@@ -64,7 +93,7 @@ public abstract class BackendMetricPropagation {
    */
   public static BackendMetricPropagation parse(List<String> metricNames) {
     if (metricNames == null || metricNames.isEmpty()) {
-      return DEACTIVATED;
+      return BackendMetricPropagation.DEACTIVATED;
     }
     boolean cpu = false;
     boolean mem = false;
@@ -94,6 +123,6 @@ public abstract class BackendMetricPropagation {
         logger.log(Level.WARNING, "Ignored unrecognized metric name: " + metricName);
       }
     }
-    return create(cpu, mem, app, namedAll, namedMetricsBuilder.build());
+    return create(cpu, mem, app, namedAll, namedMetricsBuilder.build(), true);
   }
 }

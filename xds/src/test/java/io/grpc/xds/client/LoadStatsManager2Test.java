@@ -44,7 +44,7 @@ import org.junit.runners.JUnit4;
 public class LoadStatsManager2Test {
   private static final double TOLERANCE = 1.0e-10;
   private static final BackendMetricPropagation PROPAGATE_ALL =
-      BackendMetricPropagation.create(true, true, true, true, ImmutableSet.<String>of());
+      BackendMetricPropagation.create(true, true, true, true, ImmutableSet.<String>of(), true);
   private static final String CLUSTER_NAME1 = "cluster-foo.googleapis.com";
   private static final String CLUSTER_NAME2 = "cluster-bar.googleapis.com";
   private static final String EDS_SERVICE_NAME1 = "backend-service-foo.googleapis.com";
@@ -344,9 +344,9 @@ public class LoadStatsManager2Test {
   @Test
   public void localityStatsKeyedByBackendMetricPropagation_refCounting() {
     BackendMetricPropagation config1 = BackendMetricPropagation.create(
-        true, false, false, false, ImmutableSet.<String>of());
+        true, false, false, false, ImmutableSet.<String>of(), true);
     BackendMetricPropagation config2 = BackendMetricPropagation.create(
-        false, true, false, false, ImmutableSet.<String>of());
+        false, true, false, false, ImmutableSet.<String>of(), true);
 
     ClusterLocalityStats stats1 = loadStatsManager.getClusterLocalityStats(
         CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, config1);
@@ -382,7 +382,7 @@ public class LoadStatsManager2Test {
   @Test
   public void recordTopLevelMetrics_validation() {
     BackendMetricPropagation config = BackendMetricPropagation.create(
-        true, true, true, false, ImmutableSet.<String>of());
+        true, true, true, false, ImmutableSet.<String>of(), true);
     ClusterLocalityStats stats = loadStatsManager.getClusterLocalityStats(
         CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, config);
 
@@ -430,7 +430,7 @@ public class LoadStatsManager2Test {
   public void customMetricsFilteringAndPrefixing() {
     // Case 1: namedMetricsAll is true (propagate all custom named metrics)
     BackendMetricPropagation configAll = BackendMetricPropagation.create(
-        false, false, false, true, ImmutableSet.<String>of());
+        false, false, false, true, ImmutableSet.<String>of(), true);
     ClusterLocalityStats statsAll = loadStatsManager.getClusterLocalityStats(
         CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, configAll);
 
@@ -468,7 +468,7 @@ public class LoadStatsManager2Test {
 
     // Case 2: namedMetricsAll is false, propagate only specific named metrics
     BackendMetricPropagation configSpecific = BackendMetricPropagation.create(
-        false, false, false, false, ImmutableSet.of("custom_metric1", "custom_metric3"));
+        false, false, false, false, ImmutableSet.of("custom_metric1", "custom_metric3"), true);
     ClusterLocalityStats statsSpecific = loadStatsManager.getClusterLocalityStats(
         CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY2, configSpecific);
 
@@ -486,5 +486,37 @@ public class LoadStatsManager2Test {
 
     assertThat(localityStatsSpecific.loadMetricStatsMap().keySet()).containsExactly(
         "named_metrics.custom_metric1", "named_metrics.custom_metric3");
+  }
+
+  @Test
+  public void customMetricsLegacyNoPrefix() {
+    ClusterLocalityStats statsLegacy = loadStatsManager.getClusterLocalityStats(
+        CLUSTER_NAME1, EDS_SERVICE_NAME1, LOCALITY1, BackendMetricPropagation.LEGACY);
+
+    statsLegacy.recordBackendLoadMetricStats(ImmutableMap.of(
+        "custom_metric1", 1.5,
+        "custom_metric2", 2.5
+    ));
+
+    List<ClusterStats> reports = loadStatsManager.getClusterStatsReports(CLUSTER_NAME1);
+    ClusterStats clusterStats = findClusterStats(reports, CLUSTER_NAME1, EDS_SERVICE_NAME1);
+    UpstreamLocalityStats localityStats =
+        findLocalityStats(clusterStats.upstreamLocalityStatsList(), LOCALITY1);
+
+    // Keys should be original names, NOT prefixed with "named_metrics."
+    assertThat(localityStats.loadMetricStatsMap().keySet()).containsExactly(
+        "custom_metric1", "custom_metric2");
+    assertThat(
+        localityStats.loadMetricStatsMap().get("custom_metric1")
+            .numRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(
+            localityStats.loadMetricStatsMap().get("custom_metric1")
+                .totalMetricValue()).isWithin(TOLERANCE).of(1.5);
+    assertThat(
+        localityStats.loadMetricStatsMap().get("custom_metric2")
+            .numRequestsFinishedWithMetric()).isEqualTo(1L);
+    assertThat(
+            localityStats.loadMetricStatsMap().get("custom_metric2")
+                .totalMetricValue()).isWithin(TOLERANCE).of(2.5);
   }
 }

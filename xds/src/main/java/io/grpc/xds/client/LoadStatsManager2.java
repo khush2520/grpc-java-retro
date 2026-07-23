@@ -498,11 +498,12 @@ public final class LoadStatsManager2 {
         if (backendMetricPropagation.namedMetricsAll()
             || backendMetricPropagation.namedMetrics().contains(name)) {
           if (Double.isFinite(value) && value >= 0) {
-            String prefixedName = "named_metrics." + name;
-            if (!loadMetricStatsMap.containsKey(prefixedName)) {
-              loadMetricStatsMap.put(prefixedName, new BackendLoadMetricStats(1, value));
+            String finalName = backendMetricPropagation.usePrefix()
+                ? "named_metrics." + name : name;
+            if (!loadMetricStatsMap.containsKey(finalName)) {
+              loadMetricStatsMap.put(finalName, new BackendLoadMetricStats(1, value));
             } else {
-              loadMetricStatsMap.get(prefixedName)
+              loadMetricStatsMap.get(finalName)
                   .addMetricValueAndIncrementRequestsFinished(value);
             }
           } else {

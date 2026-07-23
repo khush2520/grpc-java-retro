@@ -306,7 +306,7 @@ class XdsClusterResource extends XdsResourceType<CdsUpdate> {
       }
     }
 
-    BackendMetricPropagation backendMetricPropagation = BackendMetricPropagation.DEACTIVATED;
+    BackendMetricPropagation backendMetricPropagation = BackendMetricPropagation.LEGACY;
     if (enableOrcaLrsPropagation) {
       backendMetricPropagation = BackendMetricPropagation.parse(
           cluster.getLrsReportEndpointMetricsList());

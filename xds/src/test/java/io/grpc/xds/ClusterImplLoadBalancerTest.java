@@ -117,7 +117,7 @@ public class ClusterImplLoadBalancerTest {
 
   private static final double TOLERANCE = 1.0e-10;
   private static final BackendMetricPropagation PROPAGATE_ALL =
-      BackendMetricPropagation.create(true, true, true, true, ImmutableSet.<String>of());
+      BackendMetricPropagation.create(true, true, true, true, ImmutableSet.<String>of(), true);
   private static final String AUTHORITY = "api.google.com";
   private static final String CLUSTER = "cluster-foo.googleapis.com";
   private static final String EDS_SERVICE_NAME = "service.googleapis.com";
@@ -1282,7 +1282,7 @@ public class ClusterImplLoadBalancerTest {
         buildWeightedTargetConfig(ImmutableMap.of(locality, 10));
 
     BackendMetricPropagation config1 = BackendMetricPropagation.create(
-        true, false, false, false, ImmutableSet.<String>of());
+        true, false, false, false, ImmutableSet.<String>of(), true);
     ClusterImplConfig lbConfig1 = new ClusterImplConfig(CLUSTER, EDS_SERVICE_NAME, LRS_SERVER_INFO,
         null, Collections.<DropOverload>emptyList(),
         GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(
@@ -1311,7 +1311,7 @@ public class ClusterImplLoadBalancerTest {
 
     // Now, update configuration with a new BackendMetricPropagation
     BackendMetricPropagation config2 = BackendMetricPropagation.create(
-        false, true, false, false, ImmutableSet.<String>of());
+        false, true, false, false, ImmutableSet.<String>of(), true);
     ClusterImplConfig lbConfig2 = new ClusterImplConfig(CLUSTER, EDS_SERVICE_NAME, LRS_SERVER_INFO,
         null, Collections.<DropOverload>emptyList(),
         GracefulSwitchLoadBalancer.createLoadBalancingPolicyConfig(

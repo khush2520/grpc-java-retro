@@ -2515,7 +2515,7 @@ public abstract class GrpcXdsClientImplTestBase {
       CdsUpdate cdsUpdate = cdsUpdateCaptor.getValue();
 
       BackendMetricPropagation backendMetricPropagation = cdsUpdate.backendMetricPropagation();
-      assertThat(backendMetricPropagation).isEqualTo(BackendMetricPropagation.DEACTIVATED);
+      assertThat(backendMetricPropagation).isEqualTo(BackendMetricPropagation.LEGACY);
     } finally {
       XdsClusterResource.enableOrcaLrsPropagation = originalValue;
     }
