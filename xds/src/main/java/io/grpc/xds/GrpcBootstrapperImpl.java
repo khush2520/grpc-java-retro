@@ -104,7 +104,22 @@ class GrpcBootstrapperImpl extends BootstrapperImpl {
   protected Object getImplSpecificConfig(Map<String, ?> serverConfig, String serverUri)
       throws XdsInitializationException {
     ConfiguredChannelCredentials configuredChannel = getChannelCredentials(serverConfig, serverUri);
-    return configuredChannel != null ? configuredChannel.channelCredentials() : null;
+    if (configuredChannel == null) {
+      return null;
+    }
+    io.grpc.ChannelCredentials creds = configuredChannel.channelCredentials();
+    boolean enableXdsBootstrapCallCreds = io.grpc.internal.GrpcUtil.getFlag("GRPC_EXPERIMENTAL_XDS_BOOTSTRAP_CALL_CREDS", false);
+    if (enableXdsBootstrapCallCreds) {
+      List<?> rawCallCredsList = JsonUtil.getList(serverConfig, "call_creds");
+      if (rawCallCredsList != null && !rawCallCredsList.isEmpty()) {
+        Optional<io.grpc.CallCredentials> callCredentials =
+            parseCallCredentials(JsonUtil.checkObjectList(rawCallCredsList));
+        if (callCredentials.isPresent()) {
+          creds = io.grpc.CompositeChannelCredentials.create(creds, callCredentials.get());
+        }
+      }
+    }
+    return creds;
   }
 
   @GuardedBy("GrpcBootstrapperImpl.class")
@@ -195,7 +210,7 @@ class GrpcBootstrapperImpl extends BootstrapperImpl {
       List<?> rawCallCredsList = JsonUtil.getList(serviceConfig, "call_creds");
       if (rawCallCredsList != null && !rawCallCredsList.isEmpty()) {
         callCredentials =
-            parseCallCredentials(JsonUtil.checkObjectList(rawCallCredsList), targetUri);
+            parseCallCredentials(JsonUtil.checkObjectList(rawCallCredsList));
       }
 
       AllowedGrpcService.Builder b = AllowedGrpcService.builder()
@@ -207,16 +222,24 @@ class GrpcBootstrapperImpl extends BootstrapperImpl {
         GrpcBootstrapImplConfig.create(AllowedGrpcServices.create(builder.build()));
     return Optional.of(customConfig);
   }
-
-  @SuppressWarnings("unused")
-  private static Optional<CallCredentials> parseCallCredentials(List<Map<String, ?>> jsonList,
-                                                          String targetUri)
+  private static Optional<CallCredentials> parseCallCredentials(List<Map<String, ?>> jsonList)
       throws XdsInitializationException {
-    // TODO(sauravzg): Currently no xDS call credentials providers are implemented (no
-    // XdsCallCredentialsRegistry).
-    // As per A102/A97, we should just ignore unsupported call credentials types
-    // without throwing an exception.
-    return Optional.empty();
+    CallCredentials creds = null;
+    for (Map<String, ?> callCreds : jsonList) {
+      String type = JsonUtil.getString(callCreds, "type");
+      if ("jwt_token_file".equals(type)) {
+        Map<String, ?> config = JsonUtil.getObject(callCreds, "config");
+        if (config == null) {
+          throw new XdsInitializationException("jwt_token_file requires config");
+        }
+        String jwtTokenFile = JsonUtil.getString(config, "jwt_token_file");
+        if (jwtTokenFile != null) {
+          CallCredentials c = new io.grpc.xds.JwtTokenFileCallCredentials(jwtTokenFile);
+          creds = creds == null ? c : new io.grpc.CompositeCallCredentials(creds, c);
+        }
+      }
+    }
+    return Optional.ofNullable(creds);
   }
 
   private static final class JsonChannelCredsConfig implements ChannelCredsConfig {
